@@ -1,0 +1,124 @@
+{
+  "roundtrip_error": 5.538170489265714e-12,
+  "invalid_matrix_fraction_mc": 0.0,
+  "invalid_matrix_fraction_data": 0.0,
+  "pd_fraction_after_correction": 1.0,
+  "marginal_w1_before": {
+    "log_sigma_qoverp": 0.0011640094885893531,
+    "log_sigma_lambda": 0.000969759260986843,
+    "log_sigma_phi": 0.001066395320490442,
+    "log_sigma_dxy": 0.17039291657073663,
+    "log_sigma_dsz": 0.00309283040932015,
+    "pcorr_lambda_qoverp": 0.0018284315530599277,
+    "pcorr_phi_qoverp": 0.0014849480651627747,
+    "pcorr_phi_lambda": 0.1881240665214527,
+    "pcorr_dxy_qoverp": 0.001345430985670063,
+    "pcorr_dxy_lambda": 0.001684852372968438,
+    "pcorr_dxy_phi": 0.0015721083003155144,
+    "pcorr_dsz_qoverp": 0.0020602480727171394,
+    "pcorr_dsz_lambda": 0.0013435236559885058,
+    "pcorr_dsz_phi": 0.0017897904439768478,
+    "pcorr_dsz_dxy": 0.0021408636749858873
+  },
+  "marginal_w1_after": {
+    "log_sigma_qoverp": 0.0034534122825357547,
+    "log_sigma_lambda": 0.006522772464298978,
+    "log_sigma_phi": 0.0037436456546400413,
+    "log_sigma_dxy": 0.007179136209920427,
+    "log_sigma_dsz": 0.006931990885753679,
+    "pcorr_lambda_qoverp": 0.0018156279537544118,
+    "pcorr_phi_qoverp": 0.0031730549953142397,
+    "pcorr_phi_lambda": 0.018509744020518745,
+    "pcorr_dxy_qoverp": 0.011102772084720972,
+    "pcorr_dxy_lambda": 0.006666621591877097,
+    "pcorr_dxy_phi": 0.0030571042661964327,
+    "pcorr_dsz_qoverp": 0.009535695489005225,
+    "pcorr_dsz_lambda": 0.02331400229680421,
+    "pcorr_dsz_phi": 0.0030635676704958664,
+    "pcorr_dsz_dxy": 0.008942723048608504
+  },
+  "marginal_w1_mean_before": 0.02533734497976142,
+  "marginal_w1_mean_after": 0.007800791394296305,
+  "corr_max_dabs_before": 0.04793702434795233,
+  "corr_max_dabs_after": 0.03678795411413901,
+  "coverage_mc_out_of_data_range": {
+    "log_sigma_qoverp": 0.0018,
+    "log_sigma_lambda": 0.0031,
+    "log_sigma_phi": 0.00235,
+    "log_sigma_dxy": 0.00905,
+    "log_sigma_dsz": 0.0026,
+    "pcorr_lambda_qoverp": 0.0023,
+    "pcorr_phi_qoverp": 0.0025,
+    "pcorr_phi_lambda": 0.01645,
+    "pcorr_dxy_qoverp": 0.0027,
+    "pcorr_dxy_lambda": 0.0017,
+    "pcorr_dxy_phi": 0.002,
+    "pcorr_dsz_qoverp": 0.0028,
+    "pcorr_dsz_lambda": 0.0011,
+    "pcorr_dsz_phi": 0.00265,
+    "pcorr_dsz_dxy": 0.0029
+  },
+  "coverage_worst": 0.01645,
+  "classifier_auc_before": 0.8579334263511392,
+  "classifier_auc_after": 0.5522720153321878,
+  "median_sigma_ratio": {
+    "log_sigma_qoverp": {
+      "mc_over_data": 0.9990899008202841,
+      "corr_over_data": 0.9959660979744137
+    },
+    "log_sigma_lambda": {
+      "mc_over_data": 0.9993229482172087,
+      "corr_over_data": 0.9933970374081523
+    },
+    "log_sigma_phi": {
+      "mc_over_data": 0.9997620863066149,
+      "corr_over_data": 0.9969976707969759
+    },
+    "log_sigma_dxy": {
+      "mc_over_data": 0.8702235253793686,
+      "corr_over_data": 0.9943975527920589
+    },
+    "log_sigma_dsz": {
+      "mc_over_data": 1.0033689488038648,
+      "corr_over_data": 0.994790960327063
+    }
+  },
+  "latent_mean_mc": -0.017407499253749847,
+  "latent_std_mc": 0.9955263733863831,
+  "latent_clip_fraction": 0.0013,
+  "latent_clip_fraction_percomp": 8.666666666666667e-05,
+  "nll_mc": 15.397841453552246,
+  "nll_data": 15.572098731994629,
+  "n_mc": 20000,
+  "n_data": 20000,
+  "active_features": null,
+  "param": "logsigma_corr",
+  "distillation": {
+    "residual_over_feature_width": [
+      0.022453676828161167,
+      0.02058276643003366,
+      0.02061692209562969,
+      0.05659866965937618,
+      0.020122985463456578,
+      0.03215680633201062,
+      0.029116479377786903,
+      0.04633894212186957,
+      0.03569547102258173,
+      0.0419766460490825,
+      0.04876199094633433,
+      0.05435169637223722,
+      0.0653249651859198,
+      0.05096041093791526,
+      0.06334556002920402
+    ],
+    "worst_residual_over_width": 0.0653249651859198
+  },
+  "classifier_auc_after_distilled": 0.5607750083827416,
+  "onnx": "corrector.onnx",
+  "onnx_vs_torch_max_abs_diff": 9.5367431640625e-07,
+  "onnx_ops": [
+    "Gemm",
+    "Sigmoid"
+  ],
+  "onnx_external_data": false
+}

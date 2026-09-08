@@ -1,0 +1,205 @@
+"""
+covflow.correct
+===============
+
+The correction itself and its deployable distillation.
+
+morph()      packed MC covariance -> packed corrected covariance, per track,
+             via  y_corr = f_data^{-1}( f_mc(y | c) | c )  in standardised
+             feature space, then back to a (guaranteed PD) covariance matrix.
+
+distill()    fit a small MLP that reproduces the morph in one forward pass, so
+             deployment does not drag the whole spline machinery through ONNX.
+             It predicts the *residual* (y_corr - y) in units of the per-feature
+             correction size, so the identity map is the zero solution and
+             features that barely move are not drowned out in the loss.
+
+export_onnx() write the distilled MLP to ONNX (plain Gemm/Sigmoid graph).
+"""
+
+from __future__ import annotations
+
+import os
+
+import numpy as np
+import torch
+
+from . import features as F
+from . import flows as FL
+
+
+# ---------------------------------------------------------------------------
+# the morph
+# ---------------------------------------------------------------------------
+
+def morph(packed_mc, C_mc, flow_mc, flow_data, scaler,
+          param="logsigma_corr", active_features=None, device="cpu"):
+    """
+    Correct MC covariances to the data distribution.
+
+    packed_mc : (N,15) MC packed covariance (features.PACK_NAMES order)
+    C_mc      : (N,k)  raw MC context
+    scaler    : shared Standardiser
+    active_features : optional list of feature indices to correct; the rest are
+                      passed through untouched. e.g. [3] = sigma_dxy only,
+                      list(range(5)) = scales only, list(range(5,15)) = corr only.
+
+    Returns (packed_corr, y_mc, y_corr) with y_* the *unstandardised* features.
+    """
+    to_feat, to_mat = F.get_transforms(param)
+    y_mc = to_feat(F.packed_to_matrix(packed_mc))          # (N,15) unstandardised
+    ys_mc = scaler.x(y_mc)                                  # standardised
+    cs = scaler.c(C_mc)
+
+    z = FL.data_to_latent(flow_mc, ys_mc, cs, device=device)
+    ys_corr = FL.latent_to_data(flow_data, z, cs, device=device)
+    y_corr = scaler.x_inv(ys_corr)
+
+    if active_features is not None:
+        mask = np.zeros(F.N_FEATURES, dtype=bool)
+        mask[list(active_features)] = True
+        y_corr = np.where(mask[None, :], y_corr, y_mc)
+
+    packed_corr = F.matrix_to_packed(to_mat(y_corr))
+    return packed_corr, y_mc, y_corr
+
+
+def correction_size(y_mc, y_corr):
+    """Per-feature robust correction size (IQR of y_corr - y), for weighting
+    the distillation loss and for the correction_size.pdf diagnostic."""
+    d = y_corr - y_mc
+    q75, q25 = np.percentile(d, [75, 25], axis=0)
+    return np.maximum(q75 - q25, 1e-6)
+
+
+# ---------------------------------------------------------------------------
+# distillation
+# ---------------------------------------------------------------------------
+
+class ResidualMLP(torch.nn.Module):
+    """Predicts the standardised residual; deploy graph is Gemm/Sigmoid only."""
+    def __init__(self, n_in, hidden=(64, 64), n_out=F.N_FEATURES):
+        super().__init__()
+        layers, d = [], n_in
+        for h in hidden:
+            layers += [torch.nn.Linear(d, h), torch.nn.Sigmoid()]
+            d = h
+        layers += [torch.nn.Linear(d, n_out)]
+        self.net = torch.nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.net(x)
+
+
+def distill(y_mc, y_corr, C_mc, scaler,
+            hidden=(64, 64), epochs=200, lr=2e-3, batch=8192,
+            device="cpu", verbose=True):
+    """
+    Fit ResidualMLP: input = [standardised features, standardised context],
+    target = (y_corr - y_mc) / correction_size. Returns (model, size, info).
+    """
+    size = correction_size(y_mc, y_corr)
+    ys = scaler.x(y_mc)
+    cs = scaler.c(C_mc)
+    inp = np.concatenate([ys, cs], axis=1).astype(np.float32)
+    tgt = ((y_corr - y_mc) / size).astype(np.float32)
+
+    dev = torch.device(device)
+    model = ResidualMLP(inp.shape[1]).to(dev)
+    opt = torch.optim.Adam(model.parameters(), lr=lr)
+    Xtr = torch.as_tensor(inp); Ytr = torch.as_tensor(tgt)
+    g = torch.Generator().manual_seed(0)
+    for ep in range(epochs):
+        order = torch.randperm(len(Xtr), generator=g)
+        tot = 0.0
+        for s in range(0, len(order), batch):
+            b = order[s:s + batch]
+            opt.zero_grad()
+            pred = model(Xtr[b].to(dev))
+            loss = ((pred - Ytr[b].to(dev)) ** 2).mean()
+            loss.backward(); opt.step()
+            tot += loss.item() * len(b)
+        if verbose and (ep % 25 == 0 or ep == epochs - 1):
+            print(f"[distill] epoch {ep:3d}  mse {tot/len(Xtr):.5f}")
+
+    # residual quality: worst per-feature RMS residual as a fraction of width
+    model.eval()
+    with torch.no_grad():
+        pred = model(Xtr.to(dev)).cpu().numpy() * size + y_mc
+    resid = np.sqrt(((pred - y_corr) ** 2).mean(0))
+    width = np.maximum(np.percentile(y_corr, 84, 0) - np.percentile(y_corr, 16, 0), 1e-9)
+    info = {"residual_over_feature_width": (resid / width).tolist(),
+            "worst_residual_over_width": float(np.max(resid / width))}
+    return model, size, info
+
+
+def distilled_apply(model, size, packed_mc, C_mc, scaler,
+                    param="logsigma_corr", device="cpu"):
+    """Apply a distilled model the same way ApplyCovFlowONNX would in CMSSW."""
+    to_feat, to_mat = F.get_transforms(param)
+    y_mc = to_feat(F.packed_to_matrix(packed_mc))
+    inp = np.concatenate([scaler.x(y_mc), scaler.c(C_mc)], axis=1).astype(np.float32)
+    with torch.no_grad():
+        r = model(torch.as_tensor(inp).to(device)).cpu().numpy()
+    y_corr = y_mc + r * size
+    return F.matrix_to_packed(to_mat(y_corr)), y_corr
+
+
+def export_onnx(model, n_in, path, opset=17):
+    """
+    Write the distilled MLP to a SINGLE self-contained .onnx file.
+
+    torch>=2.x defaults to the dynamo exporter, which happily splits even a
+    2 kB model into an external `.onnx.data` blob -- fragile to ship into
+    CMSSW. Prefer the legacy exporter (single file, plain Gemm/Sigmoid graph);
+    if that is unavailable, fall back to dynamo and then re-save the model
+    with its weights inlined.
+    """
+    model = model.eval()
+    dummy = torch.zeros(1, n_in, dtype=torch.float32)
+    kw = dict(input_names=["features_context"],
+              output_names=["residual_over_size"],
+              dynamic_axes={"features_context": {0: "N"},
+                            "residual_over_size": {0: "N"}},
+              opset_version=opset)
+    try:
+        torch.onnx.export(model, dummy, path, dynamo=False, **kw)
+    except TypeError:                       # older torch: no dynamo kwarg
+        torch.onnx.export(model, dummy, path, **kw)
+    except Exception:                       # legacy path unavailable
+        torch.onnx.export(model, dummy, path, **kw)
+
+    # inline any external data so the single file is self-contained
+    try:
+        import onnx
+        m = onnx.load(path)                 # resolves external data if present
+        onnx.save_model(m, path, save_as_external_data=False)
+        ext = path + ".data"
+        if os.path.exists(ext):
+            os.remove(ext)
+    except Exception:
+        pass
+    return path
+
+
+def onnx_ops(path):
+    """Sorted set of operator types in the exported graph (deployment sanity)."""
+    import onnx
+    m = onnx.load(path)
+    return sorted({n.op_type for n in m.graph.node})
+
+
+def verify_onnx(path, model, n_in, n=512, seed=0, device="cpu"):
+    """
+    Run random inputs through onnxruntime and through torch; return the max
+    absolute disagreement. Exporting is not the same as exporting *correctly* --
+    this is the check that the shipped graph is the model you validated.
+    """
+    import onnxruntime as ort
+    rng = np.random.default_rng(seed)
+    x = rng.standard_normal((n, n_in)).astype(np.float32)
+    sess = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
+    o = sess.run(None, {sess.get_inputs()[0].name: x})[0]
+    with torch.no_grad():
+        t = model(torch.as_tensor(x).to(device)).cpu().numpy()
+    return float(np.max(np.abs(o - t)))
