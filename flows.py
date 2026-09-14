@@ -62,15 +62,20 @@ def build_flow(cfg: FlowConfig):
 @dataclass
 class TrainConfig:
     epochs: int = 60
-    batch_size: int = 8192
+    batch_size: int = 4096
     lr: float = 2e-3
+    lr_min_factor: float = 0.02    # cosine anneals lr -> lr*this
+    warmup_epochs: int = 2
+    schedule: str = "cosine"       # "cosine" or "none"
     weight_decay: float = 0.0
     val_frac: float = 0.15
     patience: int = 8
     clip_grad: float = 10.0
     device: str = "cpu"
+    eval_every: int = 1
     verbose: bool = True
     history: list = field(default_factory=list)
+    diagnostics: dict = field(default_factory=dict)
 
 
 def _weighted_nll(flow, y, c, w):
@@ -80,53 +85,87 @@ def _weighted_nll(flow, y, c, w):
 
 def train_flow(flow, ys, cs, w, tcfg: TrainConfig, tag=""):
     """
-    Fit `flow` on standardised features `ys` (N,15), context `cs` (N,k),
-    weights `w` (N,). Early-stops on held-out weighted NLL; restores the best
-    state. Arrays are numpy; converted here.
+    Fit `flow` by weighted maximum likelihood, with a cosine learning-rate
+    schedule.
+
+    Why the schedule matters here: at a constant lr the validation NLL of these
+    flows swings by O(0.4) nats between consecutive epochs -- more than the
+    improvement over the last 15 epochs. Early stopping then fires on noise, and
+    the "best epoch" snapshot is a lucky fluctuation rather than a converged
+    model. Because the MC and data flows draw independent fluctuations, their
+    composition f_data^-1 . f_mc stops being the identity where the two
+    distributions agree, and that shows up as a random per-track correction that
+    broadens marginals instead of shifting them.
+
+    The returned diagnostics quantify this: `val_noise` is the scatter of the
+    validation loss over the last evaluations, and `best_minus_median_sigma`
+    says how far the retained snapshot is from a typical recent epoch. Below
+    ~1.5 sigma the selection is dominated by noise.
     """
     dev = torch.device(tcfg.device)
     flow = flow.to(dev)
-    ys = torch.as_tensor(np.asarray(ys), dtype=torch.float32)
-    cs = torch.as_tensor(np.asarray(cs), dtype=torch.float32)
-    w = torch.as_tensor(np.asarray(w), dtype=torch.float32)
+    ys = torch.as_tensor(np.asarray(ys), dtype=torch.float32).to(dev)
+    cs = torch.as_tensor(np.asarray(cs), dtype=torch.float32).to(dev)
+    w = torch.as_tensor(np.asarray(w), dtype=torch.float32).to(dev)
 
     n = len(ys)
     g = torch.Generator().manual_seed(0)
     perm = torch.randperm(n, generator=g)
     n_val = int(tcfg.val_frac * n)
-    val_idx, tr_idx = perm[:n_val], perm[n_val:]
+    val_idx, tr_idx = perm[:n_val].to(dev), perm[n_val:].to(dev)
 
-    opt = torch.optim.Adam(flow.parameters(), lr=tcfg.lr,
-                           weight_decay=tcfg.weight_decay)
+    try:
+        opt = torch.optim.Adam(flow.parameters(), lr=tcfg.lr,
+                               weight_decay=tcfg.weight_decay, foreach=False)
+    except TypeError:
+        opt = torch.optim.Adam(flow.parameters(), lr=tcfg.lr,
+                               weight_decay=tcfg.weight_decay)
+
+    def lr_at(epoch):
+        if tcfg.schedule != "cosine":
+            return tcfg.lr
+        if epoch < tcfg.warmup_epochs:
+            return tcfg.lr * (epoch + 1) / max(tcfg.warmup_epochs, 1)
+        t = (epoch - tcfg.warmup_epochs) / max(tcfg.epochs - tcfg.warmup_epochs, 1)
+        f = tcfg.lr_min_factor
+        return tcfg.lr * (f + (1 - f) * 0.5 * (1 + np.cos(np.pi * min(t, 1.0))))
 
     best = float("inf")
     best_state = {k: v.detach().clone() for k, v in flow.state_dict().items()}
-    bad = 0
+    bad, best_epoch = 0, -1
+    vlosses = []
 
     for epoch in range(tcfg.epochs):
+        cur_lr = lr_at(epoch)
+        for gparam in opt.param_groups:
+            gparam["lr"] = cur_lr
         flow.train()
-        order = tr_idx[torch.randperm(len(tr_idx), generator=g)]
+        order = tr_idx[torch.randperm(len(tr_idx), generator=g).to(dev)]
         for s in range(0, len(order), tcfg.batch_size):
             b = order[s:s + tcfg.batch_size]
-            yb = ys[b].to(dev); cb = cs[b].to(dev); wb = w[b].to(dev)
+            yb, cb, wb = ys[b], cs[b], w[b]
             if wb.sum() <= 0:
                 continue
-            opt.zero_grad()
+            opt.zero_grad(set_to_none=True)
             loss = _weighted_nll(flow, yb, cb, wb)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(flow.parameters(), tcfg.clip_grad)
             opt.step()
 
+        if (epoch + 1) % max(tcfg.eval_every, 1) and epoch != tcfg.epochs - 1:
+            continue
+
         flow.eval()
         with torch.no_grad():
-            vloss = _weighted_nll(flow, ys[val_idx].to(dev),
-                                  cs[val_idx].to(dev), w[val_idx].to(dev)).item()
-        tcfg.history.append((tag, epoch, vloss))
+            vloss = _weighted_nll(flow, ys[val_idx], cs[val_idx],
+                                  w[val_idx]).item()
+        vlosses.append(vloss)
+        tcfg.history.append((tag, epoch, vloss, cur_lr))
         if tcfg.verbose:
-            print(f"[{tag}] epoch {epoch:3d}  val NLL {vloss:.4f}"
+            print(f"[{tag}] epoch {epoch:3d}  val NLL {vloss:.4f}  lr {cur_lr:.2e}"
                   + ("  *" if vloss < best - 1e-4 else ""))
         if vloss < best - 1e-4:
-            best, bad = vloss, 0
+            best, bad, best_epoch = vloss, 0, epoch
             best_state = {k: v.detach().clone() for k, v in flow.state_dict().items()}
         else:
             bad += 1
@@ -137,6 +176,30 @@ def train_flow(flow, ys, cs, w, tcfg: TrainConfig, tag=""):
 
     flow.load_state_dict(best_state)
     flow.eval()
+
+    # convergence diagnostics
+    tail = np.array(vlosses[-15:]) if len(vlosses) >= 5 else np.array(vlosses)
+    noise = float(tail.std()) if len(tail) > 1 else float("nan")
+    med = float(np.median(tail))
+    sig = (med - best) / noise if noise > 0 else float("nan")
+    slope = (float(np.polyfit(np.arange(len(tail)), tail, 1)[0])
+             if len(tail) > 2 else float("nan"))
+    diag = {"best_epoch": best_epoch, "best_val_nll": best,
+            "val_noise_tail": noise, "best_minus_median_sigma": sig,
+            "tail_trend_per_epoch": slope, "n_evals": len(vlosses),
+            "stopped_early": bad >= tcfg.patience}
+    tcfg.diagnostics[tag] = diag
+    if tcfg.verbose:
+        print(f"[{tag}] best epoch {best_epoch}, val NLL {best:.4f} | "
+              f"tail noise {noise:.3f}, best is {sig:.2f} sigma below median, "
+              f"trend {slope:+.4f}/epoch")
+        if sig < 1.5:
+            print(f"[{tag}] WARNING: the retained snapshot is only {sig:.2f} "
+                  f"sigma better than a typical recent epoch -- model selection "
+                  f"is dominated by noise, not convergence")
+        if slope < -0.01:
+            print(f"[{tag}] WARNING: still improving at {slope:+.4f} nats/epoch "
+                  f"-- undertrained, increase --epochs")
     return flow, best
 
 

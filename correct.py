@@ -33,26 +33,36 @@ from . import flows as FL
 # ---------------------------------------------------------------------------
 
 def morph(packed_mc, C_mc, flow_mc, flow_data, scaler,
-          param="logsigma_corr", active_features=None, device="cpu"):
+          param="logsigma_corr", active_features=None, feature_indices=None,
+          device="cpu"):
     """
     Correct MC covariances to the data distribution.
 
     packed_mc : (N,15) MC packed covariance (features.PACK_NAMES order)
     C_mc      : (N,k)  raw MC context
     scaler    : shared Standardiser
-    active_features : optional list of feature indices to correct; the rest are
-                      passed through untouched. e.g. [3] = sigma_dxy only,
-                      list(range(5)) = scales only, list(range(5,15)) = corr only.
+    feature_indices : the subspace the flows were BUILT and TRAINED in (see
+                      features.SUBSETS). Features outside it are copied from MC
+                      unchanged. Must match what was passed to build_flow.
+    active_features : optional further mask applied to the flow's output, for a
+                      full-dimensional flow whose correction you want to apply
+                      only partially. Indices refer to the full 15.
 
-    Returns (packed_corr, y_mc, y_corr) with y_* the *unstandardised* features.
+    Returns (packed_corr, y_mc, y_corr) with y_* the *unstandardised* full
+    15-component features.
     """
     to_feat, to_mat = F.get_transforms(param)
     y_mc = to_feat(F.packed_to_matrix(packed_mc))          # (N,15) unstandardised
     ys_mc = scaler.x(y_mc)                                  # standardised
     cs = scaler.c(C_mc)
 
-    z = FL.data_to_latent(flow_mc, ys_mc, cs, device=device)
-    ys_corr = FL.latent_to_data(flow_data, z, cs, device=device)
+    idx = F.subset_indices(feature_indices)
+    z = FL.data_to_latent(flow_mc, ys_mc[:, idx], cs, device=device)
+    ys_sub = FL.latent_to_data(flow_data, z, cs, device=device)
+
+    # place the corrected subspace back into the full standardised vector
+    ys_corr = ys_mc.copy()
+    ys_corr[:, idx] = ys_sub
     y_corr = scaler.x_inv(ys_corr)
 
     if active_features is not None:

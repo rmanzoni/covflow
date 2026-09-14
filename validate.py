@@ -222,6 +222,397 @@ def run(packed_mc, C_mc, w_mc,
 # plots
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# context binning: closure at fixed kinematics
+# ---------------------------------------------------------------------------
+#
+# The morph corrects p(y | c). It does NOT and cannot correct a difference in
+# p(c) itself. So if MC and data have different (pt, eta, ...) spectra -- which
+# they always do when MC is a signal sample and data is an inclusive trigger
+# stream -- the *marginal* comparison mixes two things:
+#
+#     (i)  residual error of the flows                    <- what we want
+#     (ii) different kinematics being averaged over       <- confound
+#
+# Two ways out, both provided here:
+#   * bin in context and evaluate closure cell by cell  -> binned_closure()
+#   * reweight MC to data's context spectrum and redo
+#     the global metrics                                -> context_weights()
+# The second gives one clean number; the first shows where it works and where
+# it does not.
+
+def context_bin_edges(C_pool, w_pool=None, n_bins=4):
+    """
+    Quantile edges per context dimension, from the POOLED sample so that data
+    and MC land in the same cells. n_bins may be an int (same for every
+    dimension) or a per-dimension sequence.
+    """
+    C_pool = np.asarray(C_pool, float)
+    k = C_pool.shape[1]
+    nb = [n_bins] * k if np.isscalar(n_bins) else list(n_bins)
+    if len(nb) != k:
+        raise ValueError(f"n_bins has {len(nb)} entries for {k} context dims")
+    edges = []
+    for d in range(k):
+        n = max(int(nb[d]), 1)
+        if n == 1:
+            edges.append(np.array([-np.inf, np.inf]))
+            continue
+        qs = np.linspace(0, 1, n + 1)[1:-1]
+        w = np.ones(len(C_pool)) if w_pool is None else w_pool
+        inner = _wq(C_pool[:, d], w, qs)
+        # collapse duplicate edges (discrete variables like nPV or nHits)
+        inner = np.unique(inner)
+        edges.append(np.concatenate([[-np.inf], inner, [np.inf]]))
+    return edges
+
+
+def assign_bins(C, edges):
+    """Flat cell index per row, plus the per-dimension shape."""
+    C = np.asarray(C, float)
+    shape = tuple(len(e) - 1 for e in edges)
+    idx = np.zeros(len(C), dtype=np.int64)
+    for d, e in enumerate(edges):
+        i = np.clip(np.digitize(C[:, d], e[1:-1]), 0, shape[d] - 1)
+        idx = idx * shape[d] + i
+    return idx, shape
+
+
+def cell_label(flat_idx, shape, names, edges):
+    """Human-readable description of a flat cell index."""
+    sub = []
+    rem = flat_idx
+    for d in reversed(range(len(shape))):
+        sub.append(rem % shape[d])
+        rem //= shape[d]
+    sub = sub[::-1]
+    parts = []
+    for d, i in enumerate(sub):
+        lo, hi = edges[d][i], edges[d][i + 1]
+        lo_s = "-inf" if not np.isfinite(lo) else f"{lo:.3g}"
+        hi_s = "inf" if not np.isfinite(hi) else f"{hi:.3g}"
+        parts.append(f"{names[d]}[{lo_s},{hi_s})")
+    return " ".join(parts)
+
+
+def context_weights(C_mc, w_mc, C_data, w_data, edges, max_weight=50.0):
+    """
+    Per-track weights that make MC's context spectrum match data's.
+
+    Histogram ratio in the given cells, normalised so the total MC weight is
+    preserved. Cells where MC has no entries but data does cannot be reweighted
+    -- their data fraction is reported as `uncovered`, and it is a hard limit on
+    how well any conditional correction can reproduce data marginals.
+    """
+    im, shape = assign_bins(C_mc, edges)
+    idd, _ = assign_bins(C_data, edges)
+    ncell = int(np.prod(shape))
+    hm = np.bincount(im, weights=np.clip(w_mc, 0, None), minlength=ncell)
+    hd = np.bincount(idd, weights=np.clip(w_data, 0, None), minlength=ncell)
+    hm_n = hm / max(hm.sum(), 1e-12)
+    hd_n = hd / max(hd.sum(), 1e-12)
+    uncovered = float(hd_n[(hm <= 0) & (hd > 0)].sum())
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = np.where(hm_n > 0, hd_n / np.maximum(hm_n, 1e-12), 0.0)
+    ratio = np.clip(ratio, 0.0, max_weight)
+    w = np.clip(w_mc, 0, None) * ratio[im]
+    if w.sum() > 0:
+        w *= np.clip(w_mc, 0, None).sum() / w.sum()
+    info = {"uncovered_data_fraction": uncovered,
+            "max_ratio": float(ratio.max()),
+            "clipped_cells": int((ratio >= max_weight).sum()),
+            "n_cells": ncell,
+            "effective_n": float(w.sum() ** 2 / max((w ** 2).sum(), 1e-12))}
+    return w, info
+
+
+def binned_closure(y_mc, w_mc, C_mc, y_corr,
+                   y_data, w_data, C_data,
+                   edges, context_names, feature_indices=None,
+                   min_count=400, classifier=True, device="cpu",
+                   param="logsigma_corr"):
+    """
+    Repeat the closure test inside each context cell.
+
+    Within a cell the kinematics of data and MC are (approximately) the same, so
+    a residual difference is attributable to the flows rather than to the
+    spectra. Returns a dict with a per-cell list and an aggregate.
+    """
+    names = F.feature_names(param)
+    idx = list(range(len(names))) if feature_indices is None else list(feature_indices)
+    im, shape = assign_bins(C_mc, edges)
+    idd, _ = assign_bins(C_data, edges)
+    ncell = int(np.prod(shape))
+
+    cells, skipped = [], 0
+    for c in range(ncell):
+        sm = im == c
+        sd = idd == c
+        nm, nd = int(sm.sum()), int(sd.sum())
+        if nm < min_count or nd < min_count:
+            skipped += 1
+            continue
+        ent = {"cell": c,
+               "label": cell_label(c, shape, context_names, edges),
+               "n_mc": nm, "n_data": nd}
+        w1b, w1a = {}, {}
+        for k in idx:
+            w1b[names[k]] = weighted_w1(y_mc[sm, k], w_mc[sm],
+                                        y_data[sd, k], w_data[sd])
+            w1a[names[k]] = weighted_w1(y_corr[sm, k], w_mc[sm],
+                                        y_data[sd, k], w_data[sd])
+        ent["w1_before"], ent["w1_after"] = w1b, w1a
+        ent["w1_mean_before"] = float(np.mean(list(w1b.values())))
+        ent["w1_mean_after"] = float(np.mean(list(w1a.values())))
+        if classifier:
+            ent["auc_before"] = classifier_auc(
+                y_mc[sm][:, idx], w_mc[sm], y_data[sd][:, idx], w_data[sd],
+                device=device)
+            ent["auc_after"] = classifier_auc(
+                y_corr[sm][:, idx], w_mc[sm], y_data[sd][:, idx], w_data[sd],
+                device=device)
+        cells.append(ent)
+
+    out = {"cells": cells, "n_cells_total": ncell, "n_cells_skipped": skipped,
+           "min_count": min_count}
+    if cells:
+        out["w1_mean_before"] = float(np.mean([c["w1_mean_before"] for c in cells]))
+        out["w1_mean_after"] = float(np.mean([c["w1_mean_after"] for c in cells]))
+        if classifier:
+            out["auc_before_mean"] = float(np.mean([c["auc_before"] for c in cells]))
+            out["auc_after_mean"] = float(np.mean([c["auc_after"] for c in cells]))
+            out["auc_after_worst"] = float(np.max([c["auc_after"] for c in cells]))
+        # per-feature aggregate across cells
+        agg_b = {names[k]: float(np.mean([c["w1_before"][names[k]] for c in cells]))
+                 for k in idx}
+        agg_a = {names[k]: float(np.mean([c["w1_after"][names[k]] for c in cells]))
+                 for k in idx}
+        out["w1_before_per_feature"] = agg_b
+        out["w1_after_per_feature"] = agg_a
+    return out
+
+
+# ---------------------------------------------------------------------------
+# plots
+# ---------------------------------------------------------------------------
+
+def block_feature_correlation(y, C, edges, w=None, param="logsigma_corr"):
+    """
+    Does the FLOW factorise by block? -- a different question from whether the
+    covariance matrix does.
+
+    The measured r-phi / r-z separation says each track's 5x5 matrix is block
+    diagonal. It does NOT say the *features* of the two blocks are independent
+    ACROSS tracks: sigma_phi and sigma_lambda both grow for a track with few
+    hits or lots of material, so they can be strongly correlated track to track
+    even though the matrix never mixes them.
+
+    Only if the cross-block feature correlation is small -- at fixed context,
+    since shared kinematic dependence is already handled by conditioning -- can
+    the 9-D flow safely be split into independent 6-D (r-phi) and 3-D (r-z)
+    flows. This measures that, cell by cell, and returns the worst case.
+    """
+    names = F.feature_names(param)
+    rphi, rz = F.subset_indices("rphi"), F.subset_indices("rz")
+    idx = F.subset_indices("block")
+    pos = {f: n for n, f in enumerate(idx)}
+
+    cells, _ = assign_bins(C, edges)
+    w = np.ones(len(y)) if w is None else w
+
+    per_cell = []
+    for c in np.unique(cells):
+        m = cells == c
+        if m.sum() < 200:
+            continue
+        R = weighted_corr(y[m][:, idx], w[m])
+        cross = [abs(R[pos[i], pos[j]]) for i in rphi for j in rz]
+        within = [abs(R[pos[a], pos[b]])
+                  for grp in (rphi, rz)
+                  for ai, a in enumerate(grp) for b in grp[ai + 1:]]
+        per_cell.append({"cell": int(c), "n": int(m.sum()),
+                         "max_cross": float(np.max(cross)),
+                         "median_cross": float(np.median(cross)),
+                         "median_within": float(np.median(within))})
+    if not per_cell:
+        return {"n_cells": 0}
+
+    worst = max(p["max_cross"] for p in per_cell)
+    out = {"n_cells": len(per_cell),
+           "max_cross_block_feature_corr": worst,
+           "median_cross_block_feature_corr":
+               float(np.median([p["median_cross"] for p in per_cell])),
+           "median_within_block_feature_corr":
+               float(np.median([p["median_within"] for p in per_cell])),
+           "separable": bool(worst < 0.15),
+           "rphi_features": [names[i] for i in rphi],
+           "rz_features": [names[i] for i in rz]}
+    # the single worst pair, named
+    Rall = weighted_corr(y[:, idx], w)
+    best = max(((abs(Rall[pos[i], pos[j]]), names[i], names[j])
+                for i in rphi for j in rz), key=lambda t: t[0])
+    out["worst_pair"] = {"a": best[1], "b": best[2], "abs_corr": float(best[0])}
+    return out
+
+
+def correction_noise_ratio(y_mc, y_corr, w_mc, y_data, w_data,
+                           feature_indices=None, param="logsigma_corr",
+                           w_mc_reweighted=None):
+    """
+    How big is the per-track correction compared with the disagreement it is
+    meant to fix?
+
+    dy = y_corr - y_mc has a systematic part (the shift the feature needs) and a
+    track-to-track spread. Reported per feature:
+
+      shift    |median dy|
+      scatter  half the 16-84 range of dy
+      ratio    scatter / max(shift, conditional discrepancy)
+
+    IMPORTANT -- two limitations, both learned the hard way:
+
+    1. The denominator MUST be the discrepancy at fixed context. Using the
+       inclusive marginal instead inflates it by the data/MC kinematic spectrum
+       mismatch, which for sigma_phi is a factor ten and flips the verdict.
+       Pass `w_mc_reweighted` (from context_weights) to get this right; without
+       it the ratio is only indicative.
+
+    2. Even then this is NOT a reliable predictor of whether a feature will
+       improve. A large spread is not necessarily noise: different tracks
+       genuinely need different corrections, and the features with the biggest
+       real mismodelling (sigma_dxy, sigma_dsz) need large structured
+       corrections. Measured on real data, features with ratios above 2 have
+       both improved threefold and got worse. Separating legitimate
+       track-to-track variation from noise requires comparing two
+       independently trained correctors on the same tracks, not an interquartile
+       range. Treat this table as descriptive, not as a decision rule.
+    """
+    names = F.feature_names(param)
+    idx = list(range(len(names))) if feature_indices is None else list(feature_indices)
+    out = {}
+    for k in idx:
+        dy = y_corr[:, k] - y_mc[:, k]
+        lo, hi = np.percentile(dy, [16, 84])
+        scatter = 0.5 * (hi - lo)
+        shift = abs(float(np.median(dy)))
+        w1_marg = weighted_w1(y_mc[:, k], w_mc, y_data[:, k], w_data)
+        if w_mc_reweighted is not None:
+            w1_cond = weighted_w1(y_mc[:, k], w_mc_reweighted,
+                                  y_data[:, k], w_data)
+        else:
+            w1_cond = float("nan")
+        signal = w1_cond if np.isfinite(w1_cond) else w1_marg
+        denom = max(shift, signal, 1e-9)
+        r = scatter / denom
+        out[names[k]] = {
+            "median_shift": float(np.median(dy)),
+            "scatter_1sigma": float(scatter),
+            "w1_before_marginal": float(w1_marg),
+            "w1_before_conditional": float(w1_cond),
+            "scatter_over_signal": float(r),
+            "signal_used": "conditional" if np.isfinite(w1_cond) else "marginal"}
+    return out
+
+
+def plot_binned_marginals(y_mc, w_mc, C_mc, y_corr,
+                          y_data, w_data, C_data,
+                          edges, context_names, feature_indices=None,
+                          path="marginals_binned.pdf", min_count=200,
+                          param="logsigma_corr", max_cells=64):
+    """
+    One page per feature; on each page, a grid of context cells showing
+    data / MC / corrected MC.
+
+    This is the visual form of binned_closure(). Within a cell the kinematics
+    of data and MC are matched, so what you see is the flow's residual error
+    rather than the spectrum difference that dominates the inclusive overlay.
+    Panel titles carry the cell's W1 before -> after, and go red when the
+    correction made that cell worse.
+
+    The grid is laid out with the LAST context dimension along columns and all
+    earlier dimensions folded into rows, so a 2-D context reads as a natural
+    (dim0 x dim1) matrix.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_pdf import PdfPages
+
+    names = F.feature_names(param)
+    idx = list(range(len(names))) if feature_indices is None else list(feature_indices)
+
+    im, shape = assign_bins(C_mc, edges)
+    idd, _ = assign_bins(C_data, edges)
+    ncell = int(np.prod(shape))
+    if ncell > max_cells:
+        raise ValueError(f"{ncell} context cells exceeds max_cells={max_cells}; "
+                         f"use coarser --closure-bins for the plots")
+
+    # Grid layout: ignore context dimensions that have only one bin, otherwise
+    # a trailing singleton (e.g. --plot-bins 3,3,1,1) collapses the grid to a
+    # single column. Columns follow the LAST non-singleton dimension.
+    multi = [d for d, s in enumerate(shape) if s > 1]
+    if len(multi) >= 2:
+        ncols = shape[multi[-1]]
+    elif len(multi) == 1:
+        ncols = int(np.ceil(np.sqrt(ncell)))
+    else:
+        ncols = 1
+    ncols = max(1, min(ncols, ncell))
+    nrows = int(np.ceil(ncell / ncols))
+
+    # cell occupancy, so sparse cells are drawn but visibly marked
+    counts = [(int((im == c).sum()), int((idd == c).sum())) for c in range(ncell)]
+
+    with PdfPages(path) as pdf:
+        for k in idx:
+            fig, axes = plt.subplots(nrows, ncols,
+                                     figsize=(2.6 * ncols, 2.3 * nrows),
+                                     squeeze=False)
+            for c in range(nrows * ncols):
+                ax = axes[c // ncols][c % ncols]
+                if c >= ncell:
+                    ax.axis("off")
+                    continue
+                nm, nd = counts[c]
+                if nm < min_count or nd < min_count:
+                    ax.text(0.5, 0.5, f"n={nm}/{nd}\ntoo few",
+                            ha="center", va="center", fontsize=7,
+                            color="0.6", transform=ax.transAxes)
+                    ax.set_xticks([]); ax.set_yticks([])
+                    ax.set_title(cell_label(c, shape, context_names, edges),
+                                 fontsize=5.5, color="0.6")
+                    continue
+                sm, sd = im == c, idd == c
+                lo, hi = _wq(y_data[sd, k], w_data[sd], [0.005, 0.995])
+                if not np.isfinite(lo) or hi <= lo:
+                    lo, hi = float(y_data[sd, k].min()), float(y_data[sd, k].max())
+                bins = np.linspace(lo, hi, 30)
+                ax.hist(y_data[sd, k], bins=bins, weights=w_data[sd], density=True,
+                        histtype="stepfilled", alpha=0.35, color="C0")
+                ax.hist(y_mc[sm, k], bins=bins, weights=w_mc[sm], density=True,
+                        histtype="step", lw=1.1, color="C1")
+                ax.hist(y_corr[sm, k], bins=bins, weights=w_mc[sm], density=True,
+                        histtype="step", lw=1.1, color="C2")
+                wb = weighted_w1(y_mc[sm, k], w_mc[sm], y_data[sd, k], w_data[sd])
+                wa = weighted_w1(y_corr[sm, k], w_mc[sm], y_data[sd, k], w_data[sd])
+                worse = wa > 1.1 * wb
+                ax.set_title(f"{cell_label(c, shape, context_names, edges)}\n"
+                             f"W1 {wb:.3f}$\\to${wa:.3f}  n={nm}/{nd}",
+                             fontsize=5.5, color=("firebrick" if worse else "black"))
+                ax.tick_params(labelsize=5)
+            # one legend for the page
+            handles = [plt.Line2D([], [], color="C0", lw=6, alpha=0.35, label="data"),
+                       plt.Line2D([], [], color="C1", lw=1.5, label="MC"),
+                       plt.Line2D([], [], color="C2", lw=1.5, label="MC corr")]
+            fig.legend(handles=handles, loc="upper right", fontsize=8, ncol=3)
+            fig.suptitle(names[k], fontsize=12, y=0.999)
+            fig.tight_layout(rect=(0, 0, 1, 0.97))
+            pdf.savefig(fig)
+            plt.close(fig)
+    return path
+
+
 def plot_marginals(y_mc, w_mc, y_data, w_data, y_corr, param="logsigma_corr",
                    path="marginals.pdf"):
     import matplotlib

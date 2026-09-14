@@ -244,6 +244,108 @@ def feature_names(name: str = "logsigma_corr"):
 
 
 # ---------------------------------------------------------------------------
+# feature subsets: which dimensions the flows are actually trained in
+# ---------------------------------------------------------------------------
+
+# NOTE the difference from `active_features` in correct.morph():
+#   * a SUBSET here changes the dimensionality of the flows themselves -- they
+#     are built, trained and inverted in that subspace only. Features outside
+#     the subset are copied from MC untouched.
+#   * `active_features` trains a full 15-D flow and then masks which components
+#     of the *output* are kept.
+# For "correct only the diagonal" you almost always want the subset: a 5-D flow
+# has far more capacity per dimension than a 15-D one at equal size, and the
+# sharply-peaked partial-correlation features -- which are the hardest for a
+# spline flow to resolve -- are removed from the problem entirely.
+
+# ---------------------------------------------------------------------------
+# r-phi / r-z block structure
+# ---------------------------------------------------------------------------
+#
+# A CMS helix fit is driven by two nearly independent measurements:
+#   r-phi (bending plane) constrains qoverp, phi, dxy
+#   r-z   (longitudinal)  constrains lambda, dsz
+# Measured on 2022C data and Bc MC (400k tracks each): within-block |partial
+# correlation| >= 0.288, cross-block <= 0.0018 -- a factor ~160 separation,
+# stable across every pt, |eta| and nPV bin. So of the 10 partial correlations
+# only 4 carry information; the other 6 are zero to within a part in 500.
+
+PARAM_BLOCKS = {"r-phi": (0, 2, 3), "r-z": (1, 4)}
+
+
+def param_block(i):
+    for name, members in PARAM_BLOCKS.items():
+        if i in members:
+            return name
+    raise KeyError(i)
+
+
+def pair_within_block(i, j):
+    return param_block(i) == param_block(j)
+
+
+# feature indices of the 4 within-block partial correlations
+WITHIN_BLOCK_PCORR = [DIM + k for k, (i, j) in enumerate(LOWER_PAIRS)
+                      if pair_within_block(i, j)]
+CROSS_BLOCK_PCORR = [DIM + k for k, (i, j) in enumerate(LOWER_PAIRS)
+                     if not pair_within_block(i, j)]
+
+
+def _block_subset(block):
+    """log-sigmas of a block's parameters plus its internal correlations."""
+    members = PARAM_BLOCKS[block]
+    idx = list(members)
+    for k, (i, j) in enumerate(LOWER_PAIRS):
+        if i in members and j in members:
+            idx.append(DIM + k)
+    return sorted(idx)
+
+
+SUBSETS = {
+    "all":  list(range(N_FEATURES)),      # 15: scales + all correlations
+    "diag": list(range(DIM)),             #  5: log sigma only
+    "corr": list(range(DIM, N_FEATURES)), # 10: partial correlations only
+    # 9: everything that carries information. Drops the 6 cross-block partial
+    # correlations, which are ~0 in data AND MC, so correcting them is pure
+    # noise-fitting -- and they are the sharply peaked features a spline flow
+    # resolves worst.
+    "block": sorted(list(range(DIM)) + WITHIN_BLOCK_PCORR),
+    "rphi": _block_subset("r-phi"),       # 6: qoverp/phi/dxy scales + 3 corr
+    "rz":   _block_subset("r-z"),         # 3: lambda/dsz scales + 1 corr
+}
+
+
+def subset_indices(spec):
+    """
+    Resolve a subset spec to a list of feature indices.
+
+    `spec` is either a key of SUBSETS ('all', 'diag', 'corr') or an explicit
+    iterable of integer indices.
+    """
+    if spec is None:
+        return list(range(N_FEATURES))
+    if isinstance(spec, str):
+        if spec not in SUBSETS:
+            raise KeyError(f"unknown feature subset {spec!r}; "
+                           f"choose from {list(SUBSETS)} or give explicit indices")
+        return list(SUBSETS[spec])
+    idx = [int(i) for i in spec]
+    if not idx:
+        raise ValueError("empty feature subset")
+    bad = [i for i in idx if not 0 <= i < N_FEATURES]
+    if bad:
+        raise ValueError(f"feature indices out of range [0,{N_FEATURES}): {bad}")
+    if len(set(idx)) != len(idx):
+        raise ValueError(f"duplicate feature indices: {idx}")
+    return idx
+
+
+def subset_names(spec, param="logsigma_corr"):
+    names = feature_names(param)
+    return [names[i] for i in subset_indices(spec)]
+
+
+# ---------------------------------------------------------------------------
 # validity helpers
 # ---------------------------------------------------------------------------
 
