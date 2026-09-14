@@ -26,6 +26,7 @@ import torch
 
 from . import features as F
 from . import flows as FL
+from .flows import to_numpy
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +136,7 @@ def distill(y_mc, y_corr, C_mc, scaler,
     # residual quality: worst per-feature RMS residual as a fraction of width
     model.eval()
     with torch.no_grad():
-        pred = model(Xtr.to(dev)).cpu().numpy() * size + y_mc
+        pred = to_numpy(model(Xtr.to(dev))) * size + y_mc
     resid = np.sqrt(((pred - y_corr) ** 2).mean(0))
     width = np.maximum(np.percentile(y_corr, 84, 0) - np.percentile(y_corr, 16, 0), 1e-9)
     info = {"residual_over_feature_width": (resid / width).tolist(),
@@ -150,7 +151,7 @@ def distilled_apply(model, size, packed_mc, C_mc, scaler,
     y_mc = to_feat(F.packed_to_matrix(packed_mc))
     inp = np.concatenate([scaler.x(y_mc), scaler.c(C_mc)], axis=1).astype(np.float32)
     with torch.no_grad():
-        r = model(torch.as_tensor(inp).to(device)).cpu().numpy()
+        r = to_numpy(model(torch.as_tensor(inp).to(device)))
     y_corr = y_mc + r * size
     return F.matrix_to_packed(to_mat(y_corr)), y_corr
 
@@ -211,5 +212,5 @@ def verify_onnx(path, model, n_in, n=512, seed=0, device="cpu"):
     sess = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
     o = sess.run(None, {sess.get_inputs()[0].name: x})[0]
     with torch.no_grad():
-        t = model(torch.as_tensor(x).to(device)).cpu().numpy()
+        t = to_numpy(model(torch.as_tensor(x).to(device)))
     return float(np.max(np.abs(o - t)))

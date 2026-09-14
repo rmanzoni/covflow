@@ -204,6 +204,31 @@ def train_flow(flow, ys, cs, w, tcfg: TrainConfig, tag=""):
 
 
 # ---------------------------------------------------------------------------
+# tensor -> ndarray
+# ---------------------------------------------------------------------------
+
+def to_numpy(t):
+    """Tensor -> ndarray, including on a torch built without NumPy support.
+
+    CMSSW ships py3-torch built with USE_NUMPY off (2.6.0 on el9_amd64_gcc13),
+    where Tensor.numpy() raises RuntimeError. Conversion INTO torch still works,
+    so only this direction needs the fallback: .tolist() goes via Python floats,
+    which is exact for float32 and costs nothing at the batch sizes an ntuplizer
+    uses (tens of tracks per event).
+
+    It is, however, roughly an order of magnitude slower than .numpy() on
+    200k-row training batches -- so train where torch has NumPy, and treat this
+    as what makes the trained model USABLE inside CMSSW, not as a way to train
+    inside it.
+    """
+    t = t.detach().cpu()
+    try:
+        return t.numpy()
+    except RuntimeError:
+        return np.asarray(t.tolist(), dtype=np.float64)
+
+
+# ---------------------------------------------------------------------------
 # latent transforms (the two directions the morph composes)
 # ---------------------------------------------------------------------------
 
@@ -217,7 +242,7 @@ def data_to_latent(flow, ys, cs, device="cpu", batch=200_000):
     out = []
     for s in range(0, len(ys), batch):
         t = flow(cs[s:s + batch].to(dev)).transform
-        out.append(t(ys[s:s + batch].to(dev)).cpu().numpy())
+        out.append(to_numpy(t(ys[s:s + batch].to(dev))))
     return np.concatenate(out, 0)
 
 
@@ -231,7 +256,7 @@ def latent_to_data(flow, zs, cs, device="cpu", batch=200_000):
     out = []
     for s in range(0, len(zs), batch):
         t = flow(cs[s:s + batch].to(dev)).transform
-        out.append(t.inv(zs[s:s + batch].to(dev)).cpu().numpy())
+        out.append(to_numpy(t.inv(zs[s:s + batch].to(dev))))
     return np.concatenate(out, 0)
 
 
@@ -243,7 +268,7 @@ def log_prob(flow, ys, cs, device="cpu", batch=200_000):
     cs = torch.as_tensor(np.asarray(cs), dtype=torch.float32)
     out = []
     for s in range(0, len(ys), batch):
-        out.append(flow(cs[s:s + batch].to(dev)).log_prob(ys[s:s + batch].to(dev)).cpu().numpy())
+        out.append(to_numpy(flow(cs[s:s + batch].to(dev)).log_prob(ys[s:s + batch].to(dev))))
     return np.concatenate(out, 0)
 
 
