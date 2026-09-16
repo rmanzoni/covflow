@@ -189,63 +189,70 @@ def drop_terms_using(expr, branches):
     return new, dropped
 
 
-def load_root(paths,
-              tree: str,
-              cov_prefix: str,
-              context_branches: Sequence[str],
-              weight_branch: str | None = None,
-              log_pt_branch: str | None = None,
-              selection: str | None = None,
-              extra_branches: Sequence[str] = (),
-              clip_negative_weights: bool = True,
-              max_events: int | None = None) -> Sample:
-    """
-    Load a Sample from one or more ROOT files.
+class _Reservoir:
+    """Uniform random subsample of a stream whose length is not known in advance.
 
-    cov_prefix        : e.g. "trk_cov_" or "mu3_cov_"; the 15 branches are
-                        cov_prefix + name for name in features.PACK_NAMES.
-    context_branches  : list of branch names used as conditioning variables.
-    weight_branch     : sWeight (data) or gen weight (MC); None -> unit weights.
-    log_pt_branch     : if given, that context branch is replaced by log(pt);
-                        keep the name in context_branches, pass it here too.
-    selection         : numpy expression over branch names, e.g.
-                        "(mu1_pt > 3) & (abs(mu1_eta) < 2.4)". Branches needed
-                        by it are read automatically. Applied BEFORE the
-                        finite/PD cleaning so the reported counts are honest.
+    Algorithm R. Needed because `max_events` has to mean the same thing it
+    always did -- a uniform random subsample of the SELECTED sample -- and the
+    old implementation got that by materialising the whole sample first, which
+    is exactly what this rewrite exists to avoid.
+
+    The per-chunk update is vectorised. Two rows in the same chunk can draw the
+    same slot; numpy fancy assignment keeps the last, which is what sequential
+    Algorithm R would have done anyway.
     """
-    import uproot
+
+    def __init__(self, k, rng):
+        self.k = int(k)
+        self.rng = rng
+        self.n = 0                  # items seen
+        self.filled = 0             # items held
+        self.buf = None             # dict name -> (k, ...) array
+
+    def add(self, block):
+        m = len(next(iter(block.values())))
+        if m == 0:
+            return
+        if self.buf is None:
+            self.buf = {name: np.empty((self.k,) + v.shape[1:], v.dtype)
+                        for name, v in block.items()}
+
+        take = min(self.k - self.filled, m)
+        if take:
+            for name, buf in self.buf.items():
+                buf[self.filled:self.filled + take] = block[name][:take]
+            self.filled += take
+            self.n += take
+
+        rest = m - take
+        if rest:
+            # item t (1-based) replaces a uniformly chosen slot with prob k/t
+            t = self.n + 1 + np.arange(rest)
+            slot = (self.rng.random(rest) * t).astype(np.int64)
+            hit = slot < self.k
+            if hit.any():
+                rows = np.nonzero(hit)[0] + take
+                for name, buf in self.buf.items():
+                    buf[slot[hit]] = block[name][rows]
+            self.n += rest
+
+    def result(self):
+        if self.buf is None:
+            return None
+        return {name: v[:self.filled] for name, v in self.buf.items()}
+
+
+def _flatten_chunk(arrays, cov_branches, context_branches, log_pt_branch,
+                   weight_branch, sel_branches, extra_branches, selection):
+    """One chunk of awkward arrays -> (X, C, w, extra, cnames, n_before_sel).
+
+    All arithmetic here is float64, whatever the caller stores afterwards: the
+    PD test takes eigenvalues of a matrix whose diagonal spans several orders of
+    magnitude, and that is not a float32 computation.
+    """
     import awkward as ak
 
-    cov_branches = [cov_prefix + n for n in F.PACK_NAMES]
-    sel_branches = selection_branches(selection) if selection else []
-    extra_branches = list(extra_branches or [])
-    want = list(dict.fromkeys(list(cov_branches) + list(context_branches)
-                              + list(sel_branches) + list(extra_branches)
-                              + ([weight_branch] if weight_branch else [])))
-
-    parts = []
-    files = [paths] if isinstance(paths, str) else list(paths)
-    for fp in files:
-        with uproot.open(fp) as fh:
-            t = fh[tree]
-            # fail loud on a bad --cov-prefix / branch typo rather than
-            # letting uproot raise something opaque deep in the read
-            have = set(t.keys())
-            missing = [b for b in want if b not in have]
-            if missing:
-                stem = cov_prefix.rstrip("_")
-                near = sorted(k for k in have if k.startswith(stem))[:20]
-                raise KeyError(
-                    f"{len(missing)} branch(es) missing from {fp}:{tree}\n"
-                    f"  missing (first 5): {missing[:5]}\n"
-                    f"  branches starting with {stem!r}: {near or 'NONE'}\n"
-                    f"  (a common cause is a --cov-prefix without its trailing "
-                    f"underscore)")
-            parts.append(t.arrays(want, library="ak", how=dict))
-    data = {k: ak.concatenate([p[k] for p in parts]) for k in want}
-
-    # broadcast context (and weight) to the covariance's structure, then flatten
-    ref = data[cov_branches[0]]
+    ref = arrays[cov_branches[0]]
     is_jagged = ref.ndim > 1
 
     def flat(name, cast=True):
@@ -257,7 +264,7 @@ def load_root(paths,
                       casting a bool ID branch to float64 makes '&' fail with
                       "ufunc 'bitwise_and' not supported for the input types".
         """
-        a = data[name]
+        a = arrays[name]
         if is_jagged:
             a, _ = ak.broadcast_arrays(a, ref)
             a = ak.flatten(a)
@@ -277,14 +284,11 @@ def load_root(paths,
         C_cols.append(col)
     C = np.stack(C_cols, axis=1)
 
-    if weight_branch:
-        w = flat(weight_branch)
-    else:
-        w = np.ones(len(X))
+    w = flat(weight_branch) if weight_branch else np.ones(len(X))
 
-    # ---- selection, on the same flat (per-track) footing as everything else --
     extra = {b: flat(b) for b in extra_branches}
     n_before_sel = len(X)
+
     if selection:
         env = dict(_SEL_GLOBALS)
         env.update({b: flat(b, cast=False) for b in sel_branches})
@@ -307,33 +311,176 @@ def load_root(paths,
         if mask.shape != (n_before_sel,):
             raise ValueError(f"selection produced shape {mask.shape}, "
                              f"expected ({n_before_sel},)")
-        if not mask.any():
-            raise ValueError(f"selection {selection!r} kept 0 of "
-                             f"{n_before_sel} rows")
         X, C, w = X[mask], C[mask], w[mask]
         extra = {k: v[mask] for k, v in extra.items()}
 
-    neg = float((w < 0).mean())
+    return X, C, w, extra, cnames, n_before_sel
+
+
+def load_root(paths,
+              tree: str,
+              cov_prefix: str,
+              context_branches: Sequence[str],
+              weight_branch: str | None = None,
+              log_pt_branch: str | None = None,
+              selection: str | None = None,
+              extra_branches: Sequence[str] = (),
+              clip_negative_weights: bool = True,
+              max_events: int | None = None,
+              dtype=np.float32,
+              chunk_size="512 MB",
+              verbose: bool = True) -> Sample:
+    """
+    Load a Sample from one or more ROOT files, one chunk at a time.
+
+    cov_prefix        : e.g. "trk_cov_" or "mu3_cov_"; the 15 branches are
+                        cov_prefix + name for name in features.PACK_NAMES.
+    context_branches  : list of branch names used as conditioning variables.
+    weight_branch     : sWeight (data) or gen weight (MC); None -> unit weights.
+    log_pt_branch     : if given, that context branch is replaced by log(pt);
+                        keep the name in context_branches, pass it here too.
+    selection         : numpy expression over branch names, e.g.
+                        "(mu1_pt > 3) & (abs(mu1_eta) < 2.4)". Branches needed
+                        by it are read automatically.
+    dtype             : storage dtype of X, C and w (`extra` branches are
+                        always float64). float32 halves the
+                        resident size and costs nothing downstream -- the flows
+                        train in float32 regardless (torch.as_tensor(...,
+                        float32)), and features.py upcasts to float64 inside
+                        every routine that needs the precision. float64 is
+                        there for an A/B check, not for normal running.
+    chunk_size        : passed to uproot.iterate. An int is a number of
+                        entries, a string like "512 MB" an uncompressed size.
+
+    WHY THIS IS CHUNKED
+
+    The previous implementation called `t.arrays(want)` per file, held every
+    result in a list, and concatenated -- so peak memory was several times the
+    FULL uncut payload of every branch in every file, and neither `selection`
+    nor `max_events` reduced it, because both were applied afterwards. On a
+    partial Run 3 sample that is an 8 GB OOM before the first epoch.
+
+    Here the selection and the finite/PD cleaning happen per chunk, so only
+    surviving rows are ever accumulated, and `max_events` is honoured by a
+    reservoir rather than by subsampling a materialised array.
+
+    Note that `max_events` still requires reading every file end to end: a
+    uniform subsample cannot be drawn from a prefix. It caps memory and
+    training time, not I/O.
+
+    ONE DELIBERATE SEMANTIC CHANGE: the finite/PD cleaning now runs BEFORE the
+    subsample, so `--max-events N` yields N usable tracks rather than N minus
+    however many had a failed fit. The subsample is still uniform, but it is a
+    different draw from the old code's -- runs are not bit-comparable across
+    this change.
+    """
+    import uproot
+
+    dtype = np.dtype(dtype)
+    cov_branches = [cov_prefix + n for n in F.PACK_NAMES]
+    sel_branches = selection_branches(selection) if selection else []
+    extra_branches = list(extra_branches or [])
+    want = list(dict.fromkeys(list(cov_branches) + list(context_branches)
+                              + list(sel_branches) + list(extra_branches)
+                              + ([weight_branch] if weight_branch else [])))
+
+    files = [paths] if isinstance(paths, str) else list(paths)
+
+    # Branch check up front, on metadata only: a typo should cost one open,
+    # not one full pass over the first file.
+    for fp in files:
+        with uproot.open(fp) as fh:
+            have = set(fh[tree].keys())
+        missing = [b for b in want if b not in have]
+        if missing:
+            stem = cov_prefix.rstrip("_")
+            near = sorted(k for k in have if k.startswith(stem))[:20]
+            raise KeyError(
+                f"{len(missing)} branch(es) missing from {fp}:{tree}\n"
+                f"  missing (first 5): {missing[:5]}\n"
+                f"  branches starting with {stem!r}: {near or 'NONE'}\n"
+                f"  (a common cause is a --cov-prefix without its trailing "
+                f"underscore)")
+
+    rng = np.random.default_rng(0)
+    reservoir = _Reservoir(max_events, rng) if max_events else None
+    blocks = []
+    n_read = n_after_sel = n_kept = n_neg = 0
+    n_bad_cov = 0
+    cnames = None
+
+    for fp in files:
+        for arrays in uproot.iterate({fp: tree}, expressions=want,
+                                     step_size=chunk_size, library="ak"):
+            X, C, w, extra, cnames, n_b = _flatten_chunk(
+                arrays, cov_branches, context_branches, log_pt_branch,
+                weight_branch, sel_branches, extra_branches, selection)
+            n_read += n_b
+            n_after_sel += len(X)
+            if len(X) == 0:
+                continue
+
+            n_neg += int((w < 0).sum())
+
+            # finite + PD, in float64, before anything is stored or sampled
+            good = np.isfinite(X).all(1) & np.isfinite(C).all(1) & np.isfinite(w)
+            good &= F.is_positive_definite(F.packed_to_matrix(X))
+            if not good.all():
+                n_bad_cov += int((~good).sum())
+                X, C, w = X[good], C[good], w[good]
+                extra = {k: v[good] for k, v in extra.items()}
+            if len(X) == 0:
+                continue
+            n_kept += len(X)
+
+            block = {"X": X.astype(dtype, copy=False),
+                     "C": C.astype(dtype, copy=False),
+                     "w": w.astype(dtype, copy=False)}
+            # `extra` stays float64 on purpose. It is a passthrough for
+            # arbitrary branches -- the sWeight mass today, an event number
+            # tomorrow -- and float32 silently mangles integer identifiers
+            # above 2^24. It is a handful of columns, so the memory is noise.
+            block.update({"extra:" + k: v for k, v in extra.items()})
+
+            if reservoir is not None:
+                reservoir.add(block)
+            else:
+                blocks.append(block)
+
+        if verbose:
+            print(f"[load]   {fp}: {n_read:,} rows read, {n_after_sel:,} pass "
+                  f"selection, {n_kept:,} usable")
+
+    if reservoir is not None:
+        merged = reservoir.result()
+        if merged is None:
+            raise ValueError("zero rows survived selection and cleaning")
+    else:
+        if not blocks:
+            raise ValueError("zero rows survived selection and cleaning")
+        keys = blocks[0].keys()
+        merged = {k: np.concatenate([b[k] for b in blocks]) for k in keys}
+        blocks.clear()
+
+    if selection and n_after_sel == 0:
+        raise ValueError(f"selection {selection!r} kept 0 of {n_read} rows")
+
+    X, C, w = merged["X"], merged["C"], merged["w"]
+    extra = {k[len("extra:"):]: v for k, v in merged.items()
+             if k.startswith("extra:")}
+
+    neg = float(n_neg / n_after_sel) if n_after_sel else 0.0
     if clip_negative_weights:
         w = np.clip(w, 0.0, None)
 
-    n_after_sel = len(X)
-
-    if max_events is not None and len(X) > max_events:
-        sel = np.random.default_rng(0).choice(len(X), max_events, replace=False)
-        X, C, w = X[sel], C[sel], w[sel]
-        extra = {k: v[sel] for k, v in extra.items()}
-
-    # keep only rows whose covariance is finite & PD (drops fit failures)
-    good = np.isfinite(X).all(1) & np.isfinite(C).all(1) & np.isfinite(w)
-    M = F.packed_to_matrix(X)
-    good &= F.is_positive_definite(M)
-    if not good.all():
-        X, C, w = X[good], C[good], w[good]
-        extra = {k: v[good] for k, v in extra.items()}
+    if verbose:
+        mb = sum(v.nbytes for v in (X, C, w)) / 2**20
+        print(f"[load] {len(X):,} tracks stored as {dtype.name} "
+              f"({mb:.0f} MB for X, C, w); {n_bad_cov:,} dropped as "
+              f"non-finite or not positive definite")
 
     return Sample(X, C, w, cnames, neg,
-                  n_read=n_before_sel, n_after_selection=n_after_sel,
+                  n_read=n_read, n_after_selection=n_after_sel,
                   selection=selection, extra=extra)
 
 

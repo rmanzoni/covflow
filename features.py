@@ -234,6 +234,31 @@ def get_transforms(name: str = "logsigma_corr"):
     return _PARAM[name]
 
 
+def packed_to_features(packed, name: str = "logsigma_corr",
+                       out_dtype=np.float64, chunk: int = 1_000_000):
+    """(N,15) packed covariance -> (N,15) features, in chunks.
+
+    Identical to `matrix_to_features(packed_to_matrix(packed))`, except that
+    the (N,5,5) float64 intermediate -- 200 bytes per track, the largest
+    transient in the whole pipeline -- is capped at `chunk` rows instead of
+    being materialised for the full sample.
+
+    The arithmetic stays float64 regardless of `out_dtype`: matrix_to_features
+    takes a Cholesky factor of the correlation matrix, and these covariances
+    span several orders of magnitude on the diagonal. Only the RESULT is cast,
+    and the features are O(1) quantities (log sigma, atanh of a partial
+    correlation), so float32 there costs ~1e-7 -- four orders of magnitude
+    below the smallest discrepancy the flows are asked to resolve.
+    """
+    to_feat, _ = get_transforms(name)
+    packed = np.asarray(packed)
+    out = np.empty((len(packed), N_FEATURES), dtype=np.dtype(out_dtype))
+    for s in range(0, len(packed), int(chunk)):
+        e = min(s + int(chunk), len(packed))
+        out[s:e] = to_feat(packed_to_matrix(packed[s:e]))
+    return out
+
+
 def feature_names(name: str = "logsigma_corr"):
     if name == "logsigma_corr":
         return list(FEATURE_NAMES)

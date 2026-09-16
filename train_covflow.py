@@ -157,6 +157,18 @@ def parse_args():
     p.add_argument("--hidden", type=int, nargs="+", default=[128, 128])
     p.add_argument("--bins", type=int, default=8)
     p.add_argument("--max-events", type=int, default=None)
+    p.add_argument("--dtype", default="float32", choices=["float32", "float64"],
+                   help="storage dtype for the covariance, context, weight and "
+                        "feature arrays. float32 halves the resident size and "
+                        "is the default: the flows train in float32 either way, "
+                        "and every routine that needs more precision (the PD "
+                        "test, the feature transform) upcasts internally. Use "
+                        "float64 only to A/B a suspected precision problem.")
+    p.add_argument("--read-chunk", default="512 MB",
+                   help="uproot.iterate step size: an integer number of "
+                        "entries, or an uncompressed size like '512 MB'. This "
+                        "is what bounds memory during the read; --max-events "
+                        "and --selection no longer have to.")
     p.add_argument("--keep-negative-weights", action="store_true")
     p.add_argument("--no-distill", action="store_true")
     p.add_argument("--no-onnx", action="store_true")
@@ -271,6 +283,10 @@ def main():
     data_sel = a.data_selection or a.selection
     mc_sel = a.mc_selection or a.selection
 
+    dt = np.dtype(a.dtype)
+    read_chunk = (int(a.read_chunk) if str(a.read_chunk).strip().isdigit()
+                  else a.read_chunk)
+
     sweight_report = None
     if a.synthetic:
         print("[load] synthetic toy")
@@ -299,12 +315,14 @@ def main():
                           selection=data_sel,
                           extra_branches=([a.sweights] if a.sweights else ()),
                           clip_negative_weights=not a.keep_negative_weights,
-                          max_events=a.max_events)
+                          max_events=a.max_events,
+                          dtype=dt, chunk_size=read_chunk)
         mc = D.load_root(mf, a.tree, a.cov_prefix, a.context,
                          weight_branch=a.mc_weight_branch, log_pt_branch=a.log_pt,
                          selection=mc_sel,
                          clip_negative_weights=not a.keep_negative_weights,
-                         max_events=a.max_events)
+                         max_events=a.max_events,
+                         dtype=dt, chunk_size=read_chunk)
         # ---- sWeights ------------------------------------------------
         if a.sweights:
             from covflow import sweights as SW
@@ -426,8 +444,10 @@ def main():
             print(f"[warn] context plots failed: {e}")
 
     to_feat, to_mat = F.get_transforms(a.param)
-    y_mc_raw = to_feat(F.packed_to_matrix(mc.X))
-    y_dat_raw = to_feat(F.packed_to_matrix(dat.X))
+    y_mc_raw = F.packed_to_features(mc.X, a.param, out_dtype=dt)
+    y_dat_raw = F.packed_to_features(dat.X, a.param, out_dtype=dt)
+    print(f"[setup] feature arrays: {y_mc_raw.nbytes / 2**20:.0f} MB (MC) + "
+          f"{y_dat_raw.nbytes / 2**20:.0f} MB (data) as {dt.name}")
 
     # ---- inject a known distortion (closure test) ----------------------
     injected = {}
@@ -536,9 +556,14 @@ def main():
 
     # ---- morph + validation -------------------------------------------
     print("[morph] correcting MC")
+    # morph works in float64 internally; the outputs only feed metrics, plots
+    # and float32 torch tensors, so they are stored at the run's dtype.
     packed_corr, y_mc, y_corr = C.morph(mc.X, mc.C, flow_mc, flow_data, scaler,
                                         param=a.param, active_features=a.active_features,
                                         feature_indices=idx, device=a.device)
+    packed_corr = packed_corr.astype(dt, copy=False)
+    y_mc = y_mc.astype(dt, copy=False)
+    y_corr = y_corr.astype(dt, copy=False)
 
     # latent diagnostics on MC
     z_mc = FL.data_to_latent(flow_mc, scaler.x(y_mc_raw)[:, idx],
@@ -566,6 +591,8 @@ def main():
         y_mc, y_corr, mc.w, y_dat_raw, dat.w, feature_indices=idx,
         param=a.param)   # recomputed with conditional signal below if available
     rep["n_mc"], rep["n_data"] = len(mc), len(dat)
+    rep["dtype"] = dt.name
+    rep["read_chunk"] = a.read_chunk
     if context_report is not None:
         rep["context"] = context_report
     rep["active_features"] = a.active_features

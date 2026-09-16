@@ -161,8 +161,38 @@ else
     SEED="${COVFLOW_SEED:-0}"
 fi
 
-OUT="${COVFLOW_OUT_BASE}/seed_${SEED}_task_${TASK_ID}"
+# Named after the array index, so that submit_gpu.sh can point Slurm's
+# --output/--error at it at submission time. See the comment there.
+OUT="${COVFLOW_OUT_BASE}/task_${TASK_ID}"
 mkdir -p "${OUT}"
+
+# Make the run directory self-contained: the seed that produced it, the seed
+# list it was drawn from, and the exact config that was sourced. Without the
+# config copy, a later edit to configs/*.conf silently rewrites the history of
+# every run that used it.
+echo "${SEED}" > "${OUT}/seed.txt"
+if [[ -n "${COVFLOW_SEED_FILE:-}" && -f "${COVFLOW_SEED_FILE}" ]]; then
+    cp -f "${COVFLOW_SEED_FILE}" "${OUT}/seed_list.txt"
+fi
+cp -f "${CONFIG}" "${OUT}/$(basename "${CONFIG}")"
+
+# Where is Slurm actually writing this? Only submit_gpu.sh points it into the
+# run directory; a bare `sbatch batch/train_gpu.sh` leaves it in the submission
+# cwd, because #SBATCH directives cannot expand shell variables.
+if command -v scontrol >/dev/null 2>&1; then
+    STDOUT_PATH="$(scontrol show job "${SLURM_JOB_ID}" 2>/dev/null \
+                   | tr ' ' '\n' | sed -n 's/^StdOut=//p' | head -1)"
+    if [[ -n "${STDOUT_PATH}" ]]; then
+        echo
+        echo "slurm stdout : ${STDOUT_PATH}"
+        if [[ "$(dirname "${STDOUT_PATH}")" != "${OUT}" ]]; then
+            echo ">>>> NOTE: that is NOT inside ${OUT}."
+            echo ">>>>       Submit through batch/submit_gpu.sh to keep .out/.err"
+            echo ">>>>       next to the pdfs. The python printout is in"
+            echo ">>>>       ${OUT}/train.log either way."
+        fi
+    fi
+fi
 
 # ------------------------------------------------------------
 # Build command
