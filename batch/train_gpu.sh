@@ -7,12 +7,22 @@
 #SBATCH --partition=gpu
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=5
+#SBATCH --cpus-per-task=2
 #SBATCH --gres=gpu:1
-#SBATCH --mem=32G
-#SBATCH --time=1-00:00:00
+#SBATCH --mem=8G
+#SBATCH --time=02:00:00
 #SBATCH --output=%x-%A_%a.out
 #SBATCH --error=%x-%A_%a.err
+#
+# cpus-per-task, mem and time above are deliberately small. A day-long, 32 GB,
+# 5-core reservation cannot be backfilled into the gaps between other jobs, so
+# on a busy partition the queue wait dominates the run. Raise them when a job
+# actually hits a limit, not before, and do it from the config rather than by
+# editing this file:
+#
+#   COVFLOW_SBATCH_ARGS="--time=12:00:00 --mem=32G"
+#
+# sbatch command-line options override the #SBATCH directives above.
 
 set -euo pipefail
 

@@ -27,9 +27,15 @@ Dry run on the synthetic toy (no ROOT, no branches needed):
 from __future__ import annotations
 
 import argparse
+import atexit
+import datetime
 import glob
 import json
 import os
+import platform
+import shlex
+import subprocess
+import sys
 
 import numpy as np
 
@@ -82,6 +88,15 @@ def parse_args():
                         "readable and each cell needs enough entries to see a "
                         "shape. Independent of --closure-bins.")
     p.add_argument("--no-binned-plots", action="store_true")
+    p.add_argument("--no-context-plots", action="store_true",
+                   help="skip context.pdf (data vs MC spectra of the "
+                        "conditioning variables)")
+    p.add_argument("--context-plot-bins", default=None,
+                   help="binning for the k-D context-cell page of context.pdf, "
+                        "e.g. '4,3,4'. Defaults to --closure-bins so the "
+                        "numbers line up with the binned closure.")
+    p.add_argument("--no-log", action="store_true",
+                   help="do not tee stdout/stderr into <out>/train.log")
     p.add_argument("--no-context-reweight", action="store_true",
                    help="skip the context-reweighted global closure")
     p.add_argument("--inject", nargs="*", default=None, metavar="IDX:DELTA",
@@ -155,6 +170,86 @@ def parse_args():
     return p.parse_args()
 
 
+class _Tee:
+    """Write to a stream and to a file at the same time.
+
+    Deliberately not `tee(1)` in the batch script: that only captures what the
+    job prints, and an interactive run -- which is how every one of these
+    trainings starts -- would keep nothing. Keeping the log inside the run
+    directory means the printout and the checkpoints it describes cannot be
+    separated later.
+
+    `fileno` is forwarded, so anything writing to the raw file descriptor (a
+    C extension, a subprocess) still reaches the terminal; it just does not
+    reach the file. Nothing in this package does that.
+    """
+
+    def __init__(self, stream, fh):
+        self._stream, self._fh = stream, fh
+
+    def write(self, s):
+        n = self._stream.write(s)
+        self._fh.write(s)
+        self._fh.flush()          # survive a hard kill (SIGKILL, node eviction)
+        return n
+
+    def flush(self):
+        self._stream.flush()
+        self._fh.flush()
+
+    def isatty(self):
+        return self._stream.isatty()
+
+    def fileno(self):
+        return self._stream.fileno()
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+def _start_log(out_dir, name="train.log"):
+    """Tee stdout and stderr into `out_dir/name` for the rest of the process.
+
+    Returns the path. Restores the streams and closes the file at exit, so an
+    uncaught traceback -- which reaches sys.stderr before interpreter shutdown
+    -- is in the file too. That is the case worth capturing.
+    """
+    path = os.path.join(out_dir, name)
+    fh = open(path, "w", buffering=1)
+
+    try:
+        head = subprocess.run(["git", "rev-parse", "HEAD"],
+                              cwd=os.path.dirname(os.path.abspath(__file__)),
+                              capture_output=True, text=True, timeout=10)
+        commit = head.stdout.strip() if head.returncode == 0 else "unknown"
+    except Exception:
+        commit = "unknown"
+
+    for line in (f"# date    : {datetime.datetime.now().isoformat(timespec='seconds')}",
+                 f"# host    : {platform.node()}",
+                 f"# python  : {platform.python_version()} ({sys.executable})",
+                 f"# covflow : {commit}",
+                 f"# cwd     : {os.getcwd()}",
+                 f"# slurm   : {os.environ.get('SLURM_JOB_ID', '-')}"
+                 f" task {os.environ.get('SLURM_ARRAY_TASK_ID', '-')}",
+                 f"# command : {shlex.join(sys.argv)}",
+                 ""):
+        fh.write(line + "\n")
+
+    out, err = sys.stdout, sys.stderr
+    sys.stdout, sys.stderr = _Tee(out, fh), _Tee(err, fh)
+
+    def _stop():
+        sys.stdout, sys.stderr = out, err
+        try:
+            fh.close()
+        except Exception:
+            pass
+
+    atexit.register(_stop)
+    return path
+
+
 def _expand(globs):
     files = []
     for g in globs:
@@ -165,6 +260,8 @@ def _expand(globs):
 def main():
     a = parse_args()
     os.makedirs(a.out, exist_ok=True)
+    if not a.no_log:
+        print(f"[log] printout duplicated to {_start_log(a.out)}")
     # torch-dependent modules imported here so --help works without torch
     from covflow import flows as FL
     from covflow import correct as C
@@ -281,6 +378,52 @@ def main():
         print("[null-test] the two halves are drawn from the SAME distribution, "
               "so the correct\n            correction is the identity -- every "
               "residual below is pure noise")
+
+    # ---- context spectra: data vs MC ------------------------------------
+    # Drawn here, before anything is trained, because it is the one plot that
+    # can invalidate the run on its own: the morph corrects p(y|c) and never
+    # p(c), so a large mismatch here means the marginal closure numbers are
+    # measuring kinematics rather than the detector, and that is worth seeing
+    # before waiting for two flows to converge.
+    context_report = None
+    if not a.no_context_plots:
+        cnb = [int(v) for v in
+               str(a.context_plot_bins or a.closure_bins).replace(",", " ").split()]
+        if len(cnb) == 1:
+            cnb = cnb * mc.C.shape[1]
+        if len(cnb) != mc.C.shape[1]:
+            raise SystemExit(f"--context-plot-bins gave {len(cnb)} values for "
+                             f"{mc.C.shape[1]} context dimensions")
+        print("[validate] context spectra")
+        try:
+            context_report = V.plot_context(
+                mc.C, mc.w, dat.C, dat.w, mc.context_names,
+                path=os.path.join(a.out, "context.pdf"), n_bins=cnb)
+            for nm, s in context_report["per_variable"].items():
+                print(f"[context] {nm:<22s} data {s['data_mean']:+.4f} +- "
+                      f"{s['data_std']:.4f}   MC {s['mc_mean']:+.4f} +- "
+                      f"{s['mc_std']:.4f}   W1 {s['w1_in_data_sigma']:.3f} sigma")
+            tv = context_report["nd_total_variation"]
+            uncov = context_report["nd_data_fraction_in_mc_empty_cells"]
+            ess = context_report["nd_reweight_ess_fraction"]
+            print(f"[context] {context_report['nd_cells']} cells (bins {cnb}): "
+                  f"total variation {tv:.3f}, {uncov:.4f} of data in cells MC "
+                  f"does not populate, reweighting ESS {ess:.3f} of MC")
+            if tv > 0.2:
+                print("[warn] the data and MC context spectra differ strongly "
+                      "(total variation > 0.2) -- read the MARGINAL closure "
+                      "numbers as spectrum mismatch, not as flow error, and "
+                      "trust the context-reweighted and binned ones instead")
+            if uncov > 0.01:
+                print(f"[warn] {uncov:.1%} of data sits in context cells with no "
+                      "MC at all -- the correction there is extrapolation, and "
+                      "no reweighting can repair it")
+            if ess < 0.3:
+                print(f"[warn] context reweighting keeps an effective "
+                      f"{ess:.1%} of the MC sample -- the reweighted closure "
+                      "numbers carry correspondingly larger statistical error")
+        except Exception as e:
+            print(f"[warn] context plots failed: {e}")
 
     to_feat, to_mat = F.get_transforms(a.param)
     y_mc_raw = to_feat(F.packed_to_matrix(mc.X))
@@ -423,6 +566,8 @@ def main():
         y_mc, y_corr, mc.w, y_dat_raw, dat.w, feature_indices=idx,
         param=a.param)   # recomputed with conditional signal below if available
     rep["n_mc"], rep["n_data"] = len(mc), len(dat)
+    if context_report is not None:
+        rep["context"] = context_report
     rep["active_features"] = a.active_features
     rep["param"] = a.param
     rep["features_spec"] = a.features

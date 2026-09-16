@@ -44,6 +44,15 @@ export COVFLOW_SEED_FILE="${SEED_FILE}"
 
 NSEEDS="${#COVFLOW_SEEDS[@]}"
 
+# Extra sbatch options, e.g. COVFLOW_SBATCH_ARGS="--time=12:00:00 --mem=32G".
+# These are appended to the sbatch command line and therefore override the
+# #SBATCH directives inside train_gpu.sh.
+SBATCH_EXTRA=()
+if [[ -n "${COVFLOW_SBATCH_ARGS:-}" ]]; then
+    # shellcheck disable=SC2206
+    SBATCH_EXTRA=(${COVFLOW_SBATCH_ARGS})
+fi
+
 echo "============================================================"
 echo "Submitting CovFlow GPU training"
 echo "============================================================"
@@ -53,6 +62,7 @@ echo "data   : ${COVFLOW_DATA}"
 echo "mc     : ${COVFLOW_MC}"
 echo "output : ${COVFLOW_OUT_BASE}"
 echo "seeds  : ${COVFLOW_SEEDS[*]}"
+echo "sbatch : ${COVFLOW_SBATCH_ARGS:-<script defaults>}"
 echo "============================================================"
 
 JOB_ID=$(
@@ -60,6 +70,7 @@ JOB_ID=$(
         --parsable \
         --export=ALL \
         --array="0-$((NSEEDS - 1))" \
+        ${SBATCH_EXTRA[@]+"${SBATCH_EXTRA[@]}"} \
         "${SCRIPT_DIR}/train_gpu.sh" \
         "${CONFIG}"
 )

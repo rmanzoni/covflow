@@ -636,6 +636,218 @@ def plot_marginals(y_mc, w_mc, y_data, w_data, y_corr, param="logsigma_corr",
     return path
 
 
+def _wstats(x, w):
+    """Weighted mean and standard deviation, negative weights clipped."""
+    x = np.asarray(x, float)
+    w = np.clip(np.asarray(w, float), 0, None)
+    s = w.sum()
+    if s <= 0:
+        return float("nan"), float("nan")
+    m = float((w * x).sum() / s)
+    v = float((w * (x - m) ** 2).sum() / s)
+    return m, float(np.sqrt(max(v, 0.0)))
+
+
+def _whist(x, w, edges):
+    """Weighted density histogram: integrates to 1 over `edges`."""
+    h, _ = np.histogram(np.asarray(x, float), bins=edges,
+                        weights=np.clip(np.asarray(w, float), 0, None))
+    width = np.diff(edges)
+    tot = (h * width).sum()
+    return h / tot if tot > 0 else h
+
+
+def plot_context(C_mc, w_mc, C_data, w_data, context_names,
+                 path="context.pdf", n_bins=4, bins_1d=50, bins_2d=30):
+    """
+    Compare the CONTEXT spectra of data and MC: one dimension at a time, every
+    pair, and the full k-dimensional cell occupancy.
+
+    Why this belongs in the report. The morph corrects p(y|c) and never p(c),
+    so any difference measured here is NOT something the flows can or should
+    fix -- it is the confound that makes the marginal AUC and W1 numbers
+    uninterpretable, and the reason the context-reweighted numbers exist. The
+    1-D panels say whether each conditioning variable is mismodelled; the 2-D
+    and k-D panels say whether the *correlations* between them are, which the
+    1-D panels cannot: three individually well-modelled variables can still
+    populate a joint region that MC barely covers, and it is the joint cells
+    that the flow actually has to extrapolate into.
+
+    Negative weights (sWeights) are clipped to zero for these diagnostics --
+    densities and quantiles are not defined otherwise -- and the clipped
+    fraction is reported so the size of that approximation is visible.
+
+    `n_bins` is an int or a per-dimension sequence, and should normally be the
+    closure binning so these numbers line up with `binned_closure`.
+
+    Returns the numbers as a dict; writes the PDF to `path`.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_pdf import PdfPages
+
+    C_mc = np.asarray(C_mc, float)
+    C_data = np.asarray(C_data, float)
+    k = C_mc.shape[1]
+    if len(context_names) != k:
+        raise ValueError(f"{len(context_names)} names for {k} context dims")
+    wm = np.clip(np.asarray(w_mc, float), 0, None)
+    wd = np.clip(np.asarray(w_data, float), 0, None)
+
+    rep = {"context_names": list(context_names),
+           "n_mc": int(len(C_mc)), "n_data": int(len(C_data)),
+           "clipped_negative_weight_fraction": {
+               "mc": float(np.mean(np.asarray(w_mc, float) < 0)),
+               "data": float(np.mean(np.asarray(w_data, float) < 0))}}
+
+    # ---- per-variable edges, shared between data and MC ----------------
+    edges_1d = []
+    for d in range(k):
+        pool = np.concatenate([C_mc[:, d], C_data[:, d]])
+        wpool = np.concatenate([wm, wd])
+        lo, hi = _wq(pool, wpool, [0.001, 0.999])
+        if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+            lo, hi = float(pool.min()), float(pool.max()) + 1e-6
+        nuniq = len(np.unique(pool))
+        nb = min(bins_1d, max(nuniq, 2))       # discrete variables (nhits)
+        edges_1d.append(np.linspace(lo, hi, nb + 1))
+
+    per_var = {}
+    for d in range(k):
+        mm, ms = _wstats(C_mc[:, d], wm)
+        dm, ds = _wstats(C_data[:, d], wd)
+        w1 = weighted_w1(C_mc[:, d], wm, C_data[:, d], wd)
+        per_var[context_names[d]] = {
+            "mc_mean": mm, "mc_std": ms, "data_mean": dm, "data_std": ds,
+            "mean_shift_in_data_sigma": float((mm - dm) / ds) if ds > 0 else float("nan"),
+            "w1": float(w1),
+            "w1_in_data_sigma": float(w1 / ds) if ds > 0 else float("nan")}
+    rep["per_variable"] = per_var
+
+    # ---- k-dimensional cells ------------------------------------------
+    nb = [int(n_bins)] * k if np.isscalar(n_bins) else [int(v) for v in n_bins]
+    if len(nb) != k:
+        raise ValueError(f"n_bins has {len(nb)} entries for {k} context dims")
+    edges_nd = context_bin_edges(np.concatenate([C_mc, C_data], 0),
+                                 np.concatenate([wm, wd]), nb)
+    im, shape = assign_bins(C_mc, edges_nd)
+    idd, _ = assign_bins(C_data, edges_nd)
+    ncell = int(np.prod(shape))
+    pm = np.bincount(im, weights=wm, minlength=ncell)
+    pd_ = np.bincount(idd, weights=wd, minlength=ncell)
+    pm = pm / pm.sum() if pm.sum() > 0 else pm
+    pd_ = pd_ / pd_.sum() if pd_.sum() > 0 else pd_
+
+    both = (pm > 0) & (pd_ > 0)
+    ratio = np.full(ncell, np.nan)
+    ratio[both] = pd_[both] / pm[both]
+    # per-MC-track reweighting factor, i.e. what context_weights would apply
+    r_track = np.where(pm[im] > 0, ratio[im], 0.0)
+    w_rw = wm * np.nan_to_num(r_track)
+    ess = (float(w_rw.sum() ** 2 / np.square(w_rw).sum())
+           if np.square(w_rw).sum() > 0 else 0.0)
+
+    rep["nd_bins"] = nb
+    rep["nd_cells"] = ncell
+    rep["nd_cells_populated_both"] = int(both.sum())
+    rep["nd_total_variation"] = float(0.5 * np.abs(pm - pd_).sum())
+    rep["nd_data_fraction_in_mc_empty_cells"] = float(pd_[pm <= 0].sum())
+    rep["nd_max_abs_log2_ratio"] = (float(np.nanmax(np.abs(np.log2(ratio[both]))))
+                                    if both.any() else float("nan"))
+    rep["nd_reweight_ess_fraction"] = float(ess / max(len(wm), 1))
+    worst = (int(np.nanargmax(np.abs(np.log2(np.where(both, ratio, 1.0)))))
+             if both.any() else None)
+    rep["nd_worst_cell"] = (cell_label(worst, shape, context_names, edges_nd)
+                            if worst is not None else None)
+
+    # ---- draw ----------------------------------------------------------
+    with PdfPages(path) as pdf:
+        # page 1: one dimension at a time, with a ratio panel
+        fig, axes = plt.subplots(2, k, figsize=(4.2 * k, 6.4), squeeze=False,
+                                 gridspec_kw={"height_ratios": [3, 1]})
+        for d in range(k):
+            e = edges_1d[d]
+            c = 0.5 * (e[1:] + e[:-1])
+            hd = _whist(C_data[:, d], wd, e)
+            hm = _whist(C_mc[:, d], wm, e)
+            top = axes[0][d]
+            top.stairs(hd, e, fill=True, alpha=0.35, label="data")
+            top.stairs(hm, e, lw=1.5, label="MC")
+            top.set_title(context_names[d], fontsize=10)
+            top.set_ylabel("normalised")
+            if d == 0:
+                top.legend(fontsize=8)
+            bot = axes[1][d]
+            with np.errstate(divide="ignore", invalid="ignore"):
+                rr = np.where(hd > 0, hm / hd, np.nan)
+            bot.plot(c, rr, drawstyle="steps-mid", lw=1.2)
+            bot.axhline(1.0, color="k", lw=0.6)
+            bot.set_ylim(0.0, 2.0)
+            bot.set_ylabel("MC / data", fontsize=8)
+            bot.set_xlabel(context_names[d], fontsize=9)
+        fig.suptitle("Context variables, normalised to unit area", fontsize=11)
+        fig.tight_layout(); pdf.savefig(fig); plt.close(fig)
+
+        # pages 2..: every pair, data / MC / log2 ratio
+        for i in range(k):
+            for j in range(i + 1, k):
+                ex = np.linspace(edges_1d[i][0], edges_1d[i][-1], bins_2d + 1)
+                ey = np.linspace(edges_1d[j][0], edges_1d[j][-1], bins_2d + 1)
+                Hd, _, _ = np.histogram2d(C_data[:, i], C_data[:, j],
+                                          bins=[ex, ey], weights=wd)
+                Hm, _, _ = np.histogram2d(C_mc[:, i], C_mc[:, j],
+                                          bins=[ex, ey], weights=wm)
+                Hd = Hd / Hd.sum() if Hd.sum() > 0 else Hd
+                Hm = Hm / Hm.sum() if Hm.sum() > 0 else Hm
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    L = np.log2(Hm / Hd)
+                L = np.where(np.isfinite(L), L, np.nan)
+                lim = float(np.nanmax(np.abs(L))) if np.isfinite(L).any() else 1.0
+                lim = min(max(lim, 0.1), 3.0)
+
+                fig, ax = plt.subplots(1, 3, figsize=(15, 4.4))
+                for a_, H, ttl in ((ax[0], Hd, "data"), (ax[1], Hm, "MC")):
+                    m = a_.pcolormesh(ex, ey, H.T, shading="auto")
+                    fig.colorbar(m, ax=a_)
+                    a_.set_title(f"{ttl} (normalised)", fontsize=10)
+                m = ax[2].pcolormesh(ex, ey, L.T, shading="auto",
+                                     cmap="coolwarm", vmin=-lim, vmax=lim)
+                fig.colorbar(m, ax=ax[2])
+                ax[2].set_title("log2(MC / data); white = empty in one",
+                                fontsize=10)
+                for a_ in ax:
+                    a_.set_xlabel(context_names[i], fontsize=9)
+                    a_.set_ylabel(context_names[j], fontsize=9)
+                fig.tight_layout(); pdf.savefig(fig); plt.close(fig)
+
+        # last page: the full k-D cell occupancy, the closure cells themselves
+        order = np.argsort(-pd_)
+        x = np.arange(ncell)
+        fig, axes = plt.subplots(2, 1, figsize=(max(8, ncell * 0.16), 6.4),
+                                 sharex=True,
+                                 gridspec_kw={"height_ratios": [3, 1]})
+        axes[0].step(x, pd_[order], where="mid", lw=1.4, label="data")
+        axes[0].step(x, pm[order], where="mid", lw=1.4, label="MC")
+        axes[0].set_yscale("log")
+        axes[0].set_ylabel("fraction of sample")
+        axes[0].legend(fontsize=8)
+        axes[0].set_title(
+            f"{k}-D context cells (bins {nb}), sorted by data occupancy  |  "
+            f"total variation {rep['nd_total_variation']:.3f}", fontsize=10)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            rr = np.where(pd_[order] > 0, pm[order] / pd_[order], np.nan)
+        axes[1].step(x, rr, where="mid", lw=1.2)
+        axes[1].axhline(1.0, color="k", lw=0.6)
+        axes[1].set_ylim(0.0, 2.0)
+        axes[1].set_ylabel("MC / data", fontsize=8)
+        axes[1].set_xlabel("context cell (sorted)", fontsize=9)
+        fig.tight_layout(); pdf.savefig(fig); plt.close(fig)
+
+    rep["path"] = path
+    return rep
+
+
 def plot_correction_size(y_mc, y_corr, param="logsigma_corr",
                          path="correction_size.pdf"):
     import matplotlib

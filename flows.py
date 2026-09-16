@@ -114,12 +114,31 @@ def train_flow(flow, ys, cs, w, tcfg: TrainConfig, tag=""):
     n_val = int(tcfg.val_frac * n)
     val_idx, tr_idx = perm[:n_val].to(dev), perm[n_val:].to(dev)
 
-    try:
-        opt = torch.optim.Adam(flow.parameters(), lr=tcfg.lr,
-                               weight_decay=tcfg.weight_decay, foreach=False)
-    except TypeError:
-        opt = torch.optim.Adam(flow.parameters(), lr=tcfg.lr,
-                               weight_decay=tcfg.weight_decay)
+    # foreach=False is a CPU optimisation (~17% on Apple silicon, where the
+    # multi-tensor path fights the unified-memory allocator). On CUDA it is the
+    # wrong sign: it forces one kernel launch per parameter tensor, and an NSF
+    # with several transforms is made of many small ones. So pick per device,
+    # and degrade gracefully -- `fused` and `foreach` have both been added and
+    # had their accepted dtypes changed across torch versions, and the training
+    # environment here is not the application environment.
+    if str(tcfg.device).startswith("cuda"):
+        _opt_kwargs = ({"fused": True}, {"foreach": True}, {})
+    else:
+        _opt_kwargs = ({"foreach": False}, {})
+
+    opt = None
+    for _kw in _opt_kwargs:
+        try:
+            opt = torch.optim.Adam(flow.parameters(), lr=tcfg.lr,
+                                   weight_decay=tcfg.weight_decay, **_kw)
+            break
+        except (TypeError, RuntimeError, ValueError):
+            continue
+    if opt is None:                     # cannot happen: the last entry is {}
+        raise RuntimeError("could not construct torch.optim.Adam")
+    if tcfg.verbose:
+        print(f"[{tag}] Adam on {tcfg.device} with "
+              f"{_kw if _kw else 'default kernels'}")
 
     def lr_at(epoch):
         if tcfg.schedule != "cosine":
