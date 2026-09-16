@@ -276,8 +276,58 @@ def save_flow(flow, path):
     torch.save(flow.state_dict(), path)
 
 
+# The base distribution's two fixed buffers are registered under different names
+# by different zuko versions: 1.5 passes them positionally to
+# UnconditionalDistribution(DiagNormal, ...) so Partial names them _0/_1, while
+# 1.6 passes them as keywords so they are named loc/scale. The VALUES are
+# zeros(features) and ones(features) in both -- a standard normal, never
+# trained -- so a checkpoint written by one version is usable by the other once
+# the two keys are renamed. Nothing else in the state dict differs.
+#
+# This matters because zuko 1.6 requires Python >= 3.10 while CMSSW ships 3.9,
+# so "use the same version everywhere" is not available: training happens on
+# 1.6 and application, inside CMSSW, on 1.5.
+_BASE_ALIASES = {"base.loc": "base._0", "base.scale": "base._1"}
+
+
+def _align_base_keys(state, expected):
+    """Rename the base buffers to whatever THIS zuko calls them.
+
+    Renames only the keys in _BASE_ALIASES, only when the target name is the one
+    the model actually wants, and only after checking the buffer still holds the
+    standard normal that makes the rename an identity. Everything else must
+    already match: a checkpoint differing anywhere but the base is a different
+    model, and is left to fail on load_state_dict, loudly.
+    """
+    forward = dict(_BASE_ALIASES)
+    backward = {v: k for k, v in _BASE_ALIASES.items()}
+
+    out = {}
+    for key, val in state.items():
+        new_key = key
+        if key not in expected:
+            if key in forward and forward[key] in expected:
+                new_key = forward[key]
+            elif key in backward and backward[key] in expected:
+                new_key = backward[key]
+        if new_key != key:
+            # _0 / loc is the mean, _1 / scale the width
+            want = 0.0 if new_key.endswith("_0") or new_key.endswith("loc") else 1.0
+            if not torch.allclose(val, torch.full_like(val, want)):
+                raise RuntimeError(
+                    f"refusing to rename {key!r} -> {new_key!r}: the buffer is "
+                    f"not the constant {want} it must be for the two zuko "
+                    f"conventions to be equivalent. This checkpoint's base "
+                    f"distribution is not a standard normal, so the rename "
+                    f"would silently change the model.")
+        out[new_key] = val
+    return out
+
+
 def load_flow(cfg: FlowConfig, path):
     flow = build_flow(cfg)
-    flow.load_state_dict(torch.load(path, map_location="cpu"))
+    state = torch.load(path, map_location="cpu")
+    state = _align_base_keys(state, flow.state_dict())
+    flow.load_state_dict(state)   # strict: everything else must match exactly
     flow.eval()
     return flow
