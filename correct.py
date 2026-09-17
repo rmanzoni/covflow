@@ -35,7 +35,7 @@ from .flows import to_numpy
 
 def morph(packed_mc, C_mc, flow_mc, flow_data, scaler,
           param="logsigma_corr", active_features=None, feature_indices=None,
-          device="cpu"):
+          device="cpu", chunk=2_000_000, out_dtype=None):
     """
     Correct MC covariances to the data distribution.
 
@@ -48,30 +48,72 @@ def morph(packed_mc, C_mc, flow_mc, flow_data, scaler,
     active_features : optional further mask applied to the flow's output, for a
                       full-dimensional flow whose correction you want to apply
                       only partially. Indices refer to the full 15.
+    chunk           : rows processed at a time. Everything below is per-row
+                      arithmetic, so this changes nothing but the peak. Note
+                      that it also caps the flow's internal evaluation batch
+                      (`data_to_latent` defaults to 200k), and THAT is what
+                      dominates: the spline knot tensors are tens of kB per row
+                      in flight, so this one number sets both the host and the
+                      device peak.
+    out_dtype       : dtype of the three returned arrays. None follows
+                      `packed_mc`: float32 in, float32 out.
 
     Returns (packed_corr, y_mc, y_corr) with y_* the *unstandardised* full
     15-component features.
+
+    WHY THIS IS CHUNKED
+
+    The unchunked version held, simultaneously and at full length: the (N,5,5)
+    float64 matrices twice (once per direction of the transform, 200 B/row
+    each), y_mc, ys_mc, ys_corr, y_corr, the np.where copy and packed_corr
+    (120 B/row each in float64), plus the float32 torch tensors. Something like
+    a kilobyte per track of transient, on top of the sample itself -- which is
+    why the resident set kept climbing long after the loader had finished.
+
+    Chunking caps all of that at `chunk` rows. It cannot change the result:
+    every step is row-independent, and `data_to_latent` / `latent_to_data`
+    already batch internally.
     """
     to_feat, to_mat = F.get_transforms(param)
-    y_mc = to_feat(F.packed_to_matrix(packed_mc))          # (N,15) unstandardised
-    ys_mc = scaler.x(y_mc)                                  # standardised
-    cs = scaler.c(C_mc)
+    packed_mc = np.asarray(packed_mc)
+    C_mc = np.asarray(C_mc)
+    n = len(packed_mc)
+
+    if out_dtype is None:
+        dt = np.dtype(np.float32) if packed_mc.dtype == np.float32 \
+            else np.dtype(np.float64)
+    else:
+        dt = np.dtype(out_dtype)
 
     idx = F.subset_indices(feature_indices)
-    z = FL.data_to_latent(flow_mc, ys_mc[:, idx], cs, device=device)
-    ys_sub = FL.latent_to_data(flow_data, z, cs, device=device)
-
-    # place the corrected subspace back into the full standardised vector
-    ys_corr = ys_mc.copy()
-    ys_corr[:, idx] = ys_sub
-    y_corr = scaler.x_inv(ys_corr)
-
+    mask = None
     if active_features is not None:
         mask = np.zeros(F.N_FEATURES, dtype=bool)
         mask[list(active_features)] = True
-        y_corr = np.where(mask[None, :], y_corr, y_mc)
 
-    packed_corr = F.matrix_to_packed(to_mat(y_corr))
+    y_mc = np.empty((n, F.N_FEATURES), dtype=dt)
+    y_corr = np.empty((n, F.N_FEATURES), dtype=dt)
+    packed_corr = np.empty((n, F.N_FEATURES), dtype=dt)
+
+    step = int(chunk) if chunk else max(n, 1)
+    for s in range(0, n, step):
+        e = min(s + step, n)
+        y = F.packed_to_features(packed_mc[s:e], param, out_dtype=dt)
+        ys = scaler.x(y)
+        cs = scaler.c(C_mc[s:e])
+
+        z = FL.data_to_latent(flow_mc, ys[:, idx], cs, device=device)
+        ys[:, idx] = FL.latent_to_data(flow_data, z, cs, device=device)
+        del z
+        yc = scaler.x_inv(ys)
+
+        if mask is not None:
+            yc = np.where(mask[None, :], yc, y)
+
+        y_mc[s:e] = y
+        y_corr[s:e] = yc
+        packed_corr[s:e] = F.matrix_to_packed(to_mat(yc))
+
     return packed_corr, y_mc, y_corr
 
 
@@ -112,8 +154,8 @@ def distill(y_mc, y_corr, C_mc, scaler,
     size = correction_size(y_mc, y_corr)
     ys = scaler.x(y_mc)
     cs = scaler.c(C_mc)
-    inp = np.concatenate([ys, cs], axis=1).astype(np.float32)
-    tgt = ((y_corr - y_mc) / size).astype(np.float32)
+    inp = np.concatenate([ys, cs], axis=1).astype(np.float32, copy=False)
+    tgt = ((y_corr - y_mc) / size).astype(np.float32, copy=False)
 
     dev = torch.device(device)
     model = ResidualMLP(inp.shape[1]).to(dev)
@@ -135,8 +177,15 @@ def distill(y_mc, y_corr, C_mc, scaler,
 
     # residual quality: worst per-feature RMS residual as a fraction of width
     model.eval()
+    # in batches: the whole training set in one forward pass is a GPU
+    # allocation proportional to the sample, which is exactly the thing that
+    # falls over first on a full-statistics run
+    chunks = []
     with torch.no_grad():
-        pred = to_numpy(model(Xtr.to(dev))) * size + y_mc
+        for s in range(0, len(Xtr), 200_000):
+            chunks.append(to_numpy(model(Xtr[s:s + 200_000].to(dev))))
+    pred = np.concatenate(chunks, 0) * size + y_mc
+    del chunks
     resid = np.sqrt(((pred - y_corr) ** 2).mean(0))
     width = np.maximum(np.percentile(y_corr, 84, 0) - np.percentile(y_corr, 16, 0), 1e-9)
     info = {"residual_over_feature_width": (resid / width).tolist(),

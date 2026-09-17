@@ -164,6 +164,14 @@ def parse_args():
                         "and every routine that needs more precision (the PD "
                         "test, the feature transform) upcasts internally. Use "
                         "float64 only to A/B a suspected precision problem.")
+    p.add_argument("--morph-chunk", type=int, default=200_000,
+                   help="rows per block in correct.morph and in the feature "
+                        "transform. This also caps the flow's own evaluation "
+                        "batch, which is what actually dominates the peak "
+                        "(host AND device): measured at ~40 kB per row in "
+                        "flight for a small NSF, more for a wide one. Lower it "
+                        "if the job dies after training rather than during the "
+                        "read; it changes the peak and nothing else.")
     p.add_argument("--read-chunk", default="512 MB",
                    help="uproot.iterate step size: an integer number of "
                         "entries, or an uncompressed size like '512 MB'. This "
@@ -444,8 +452,10 @@ def main():
             print(f"[warn] context plots failed: {e}")
 
     to_feat, to_mat = F.get_transforms(a.param)
-    y_mc_raw = F.packed_to_features(mc.X, a.param, out_dtype=dt)
-    y_dat_raw = F.packed_to_features(dat.X, a.param, out_dtype=dt)
+    y_mc_raw = F.packed_to_features(mc.X, a.param, out_dtype=dt,
+                                    chunk=a.morph_chunk)
+    y_dat_raw = F.packed_to_features(dat.X, a.param, out_dtype=dt,
+                                     chunk=a.morph_chunk)
     print(f"[setup] feature arrays: {y_mc_raw.nbytes / 2**20:.0f} MB (MC) + "
           f"{y_dat_raw.nbytes / 2**20:.0f} MB (data) as {dt.name}")
 
@@ -556,14 +566,12 @@ def main():
 
     # ---- morph + validation -------------------------------------------
     print("[morph] correcting MC")
-    # morph works in float64 internally; the outputs only feed metrics, plots
-    # and float32 torch tensors, so they are stored at the run's dtype.
+    # morph is chunked and returns the run's dtype directly; its outputs feed
+    # metrics, plots and float32 torch tensors, none of which want float64.
     packed_corr, y_mc, y_corr = C.morph(mc.X, mc.C, flow_mc, flow_data, scaler,
                                         param=a.param, active_features=a.active_features,
-                                        feature_indices=idx, device=a.device)
-    packed_corr = packed_corr.astype(dt, copy=False)
-    y_mc = y_mc.astype(dt, copy=False)
-    y_corr = y_corr.astype(dt, copy=False)
+                                        feature_indices=idx, device=a.device,
+                                        chunk=a.morph_chunk, out_dtype=dt)
 
     # latent diagnostics on MC
     z_mc = FL.data_to_latent(flow_mc, scaler.x(y_mc_raw)[:, idx],
@@ -593,6 +601,7 @@ def main():
     rep["n_mc"], rep["n_data"] = len(mc), len(dat)
     rep["dtype"] = dt.name
     rep["read_chunk"] = a.read_chunk
+    rep["morph_chunk"] = a.morph_chunk
     if context_report is not None:
         rep["context"] = context_report
     rep["active_features"] = a.active_features

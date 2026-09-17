@@ -12,6 +12,21 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_CONFIG="${SCRIPT_DIR}/../configs/train_gpu.conf"
 CONFIG="${1:-${COVFLOW_CONFIG:-${DEFAULT_CONFIG}}}"
+shift || true
+
+# Anything after the config used to be read and discarded without a word, so
+#   ./batch/submit_gpu.sh <config> --time=12:00:00
+# submitted happily with the default wall clock and truncated the training two
+# hours in. Extra sbatch options go through COVFLOW_SBATCH_ARGS; say so rather
+# than swallow them.
+if [[ $# -gt 0 ]]; then
+    echo "ERROR: unexpected argument(s) after the config file: $*"
+    echo
+    echo "sbatch options are not read from the command line here. Use:"
+    echo "  COVFLOW_SBATCH_ARGS=\"$*\" ${BASH_SOURCE[0]} ${CONFIG}"
+    echo "or set COVFLOW_TIME / COVFLOW_MEM in ${CONFIG}."
+    exit 2
+fi
 
 if [[ ! -f "${CONFIG}" ]]; then
     echo "ERROR: configuration file not found:"
@@ -33,6 +48,17 @@ source "${CONFIG}"
 #   COVFLOW_SEEDS=(0 1 2 3 4)
 #
 COVFLOW_SEEDS=("${COVFLOW_SEEDS[@]:-0}")
+
+# Wall clock and memory, overridable per config. The defaults live here rather
+# than as #SBATCH directives in train_gpu.sh so that there is exactly one place
+# to change them, and so the echo below can report the real values.
+#
+# For reference, on the T3 `gpu` partition: MaxTime=7-00:00:00,
+# DefaultTime=1-00:00:00, and the `normal` QOS sets no MaxWall. Nothing caps you
+# below a week -- but a larger request is scheduled later, so raise these
+# against a measured Elapsed/MaxRSS rather than on principle.
+COVFLOW_TIME="${COVFLOW_TIME:-5:00:00}"
+COVFLOW_MEM="${COVFLOW_MEM:-64G}"
 
 mkdir -p "${COVFLOW_OUT_BASE}"
 
@@ -57,9 +83,10 @@ export COVFLOW_SEED_FILE="${SEED_FILE}"
 
 NSEEDS="${#COVFLOW_SEEDS[@]}"
 
-# Extra sbatch options, e.g. COVFLOW_SBATCH_ARGS="--time=12:00:00 --mem=32G".
-# These are appended to the sbatch command line and therefore override the
-# #SBATCH directives inside train_gpu.sh.
+# Extra sbatch options, e.g. COVFLOW_SBATCH_ARGS="--gres=gpu:2".
+# These are appended LAST on the sbatch command line, so they override both the
+# #SBATCH directives inside train_gpu.sh and the --time/--mem set above. For
+# wall clock and memory alone, prefer COVFLOW_TIME / COVFLOW_MEM.
 SBATCH_EXTRA=()
 if [[ -n "${COVFLOW_SBATCH_ARGS:-}" ]]; then
     # shellcheck disable=SC2206
@@ -75,7 +102,9 @@ echo "data   : ${COVFLOW_DATA}"
 echo "mc     : ${COVFLOW_MC}"
 echo "output : ${COVFLOW_OUT_BASE}"
 echo "seeds  : ${COVFLOW_SEEDS[*]}"
-echo "sbatch : ${COVFLOW_SBATCH_ARGS:-<script defaults>}"
+echo "time   : ${COVFLOW_TIME}"
+echo "mem    : ${COVFLOW_MEM}"
+echo "sbatch : ${COVFLOW_SBATCH_ARGS:-<none>}"
 echo "logs   : ${COVFLOW_OUT_BASE}/task_<n>/covflow-<jobid>_<n>.{out,err}"
 echo "============================================================"
 
@@ -83,9 +112,9 @@ JOB_ID=$(
     sbatch \
         --parsable \
         --export=ALL \
-        --mem=64G \
+        --mem="${COVFLOW_MEM}" \
         --array="0-$((NSEEDS - 1))" \
-        --time=8:00:00 \
+        --time="${COVFLOW_TIME}" \
         --output="${COVFLOW_OUT_BASE}/task_%a/covflow-%A_%a.out" \
         --error="${COVFLOW_OUT_BASE}/task_%a/covflow-%A_%a.err" \
         ${SBATCH_EXTRA[@]+"${SBATCH_EXTRA[@]}"} \

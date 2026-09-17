@@ -66,14 +66,32 @@ class Standardiser:
         cs = np.where(cs < 1e-12, 1.0, cs)
         return cls(fm.tolist(), fs.tolist(), cm.tolist(), cs.tolist())
 
+    @staticmethod
+    def _wd(A):
+        """Array plus the dtype to work in: float32 in, float32 out.
+
+        `fit` stays float64 -- the moments are a reduction over the whole
+        sample and cost nothing. But x/x_inv/c run on (N,15) arrays several
+        times per job, and forcing float64 there turned every one of them into
+        a full-size float64 allocation even when the caller held float32.
+        Standardising is (x-mu)/sd with both O(1); float32 costs ~1e-7 and
+        keeps the array zero-copy on the way into torch, which takes float32
+        anyway.
+        """
+        A = np.asarray(A)
+        return A, (A.dtype if A.dtype == np.float32 else np.dtype(np.float64))
+
     def x(self, X):
-        return (np.asarray(X, float) - self.feat_mean) / self.feat_std
+        X, dt = self._wd(X)
+        return (X - np.asarray(self.feat_mean, dt)) / np.asarray(self.feat_std, dt)
 
     def x_inv(self, Xs):
-        return np.asarray(Xs, float) * self.feat_std + self.feat_mean
+        Xs, dt = self._wd(Xs)
+        return Xs * np.asarray(self.feat_std, dt) + np.asarray(self.feat_mean, dt)
 
     def c(self, C):
-        return (np.asarray(C, float) - self.ctx_mean) / self.ctx_std
+        C, dt = self._wd(C)
+        return (C - np.asarray(self.ctx_mean, dt)) / np.asarray(self.ctx_std, dt)
 
     def save(self, path):
         with open(path, "w") as fh:

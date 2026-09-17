@@ -9,20 +9,22 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
 #SBATCH --gres=gpu:1
-#SBATCH --mem=8G
-#SBATCH --time=02:00:00
 #SBATCH --output=%x-%A_%a.out
 #SBATCH --error=%x-%A_%a.err
 #
-# cpus-per-task, mem and time above are deliberately small. A day-long, 32 GB,
-# 5-core reservation cannot be backfilled into the gaps between other jobs, so
-# on a busy partition the queue wait dominates the run. Raise them when a job
-# actually hits a limit, not before, and do it from the config rather than by
-# editing this file:
+# There is deliberately no --time and no --mem here.
 #
-#   COVFLOW_SBATCH_ARGS="--time=12:00:00 --mem=32G"
+# submit_gpu.sh always passes both on the sbatch command line, from
+# COVFLOW_TIME / COVFLOW_MEM in the config. A directive here would be dead on
+# that path and live on the direct `sbatch batch/train_gpu.sh` path -- which is
+# exactly how a stale --time=02:00:00 truncated a training that had asked for
+# more, silently, because sbatch reports no conflict. With the lines gone, a
+# direct submission inherits the partition defaults (DefaultTime=1-00:00:00 on
+# `gpu`), which is a safe thing to inherit.
 #
-# sbatch command-line options override the #SBATCH directives above.
+# cpus-per-task stays small on purpose: a wide reservation cannot be backfilled
+# into the gaps between other jobs, so on a busy partition the queue wait
+# dominates the run.
 
 set -euo pipefail
 
