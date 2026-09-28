@@ -88,6 +88,11 @@ def parse_args():
                         "readable and each cell needs enough entries to see a "
                         "shape. Independent of --closure-bins.")
     p.add_argument("--no-binned-plots", action="store_true")
+    p.add_argument("--plot-cells-per-page", type=int, default=24,
+                   help="context cells per page in marginals_binned.pdf, "
+                        "rounded down to a whole number of columns. There is "
+                        "no ceiling on the total number of cells; raise this "
+                        "for denser pages, lower it for readable ones.")
     p.add_argument("--no-context-plots", action="store_true",
                    help="skip context.pdf (data vs MC spectra of the "
                         "conditioning variables)")
@@ -182,6 +187,10 @@ def parse_args():
     p.add_argument("--no-onnx", action="store_true")
     p.add_argument("--device", default="cpu")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--manifest-dir", default=None,
+                   help="extra directory to receive a copy of covflow.json, "
+                        "e.g. the production area the application code reads. "
+                        "The run directory always gets one.")
     p.add_argument("--synthetic", action="store_true",
                    help="use the built-in toy instead of ROOT files")
     p.add_argument("--synthetic-n", type=int, default=200_000,
@@ -268,6 +277,91 @@ def _start_log(out_dir, name="train.log"):
 
     atexit.register(_stop)
     return path
+
+
+def _git_commit(default="unknown"):
+    try:
+        r = subprocess.run(["git", "rev-parse", "HEAD"],
+                           cwd=os.path.dirname(os.path.abspath(__file__)),
+                           capture_output=True, text=True, timeout=10)
+        return r.stdout.strip() if r.returncode == 0 else default
+    except Exception:
+        return default
+
+
+def write_manifest(out_dir, a, context_names, idx, onnx=None, extra_dir=None):
+    """
+    Write covflow.json: everything needed to APPLY this correction, and nothing
+    else. Provenance of the training run lives in report.json next to it.
+
+    The point of the file is that a directory of .pt and .json blobs does not
+    say what its inputs are. Applying a mu2-trained flow to mu1 tracks, or
+    feeding pt where log(pt) is expected, are both silent failures that produce
+    plausible numbers. So the manifest records the branch names as trained, the
+    log-pt transform, the packed covariance order and the feature subspace --
+    not abstract role names, which would put a hand-written mapping between the
+    training and the application and reintroduce exactly that failure.
+
+    zuko and torch versions are in here because they have already bitten once:
+    a 1.5 checkpoint names the two base-distribution buffers base._0/base._1
+    and a 1.6 one names them base.loc/base.scale, with identical values. The
+    application side needs to know which it is holding.
+    """
+    names_all = F.feature_names(a.param)
+    man = {
+        "schema": "covflow/1",
+        "created": datetime.datetime.now().isoformat(timespec="seconds"),
+        "covflow_commit": _git_commit(),
+        "param": a.param,
+        "features": a.features,
+        "feature_indices": [int(i) for i in idx],
+        "feature_names": [names_all[i] for i in idx],
+        "all_feature_names": list(names_all),
+        "packed_names": list(F.PACK_NAMES),
+        "cov_prefix": a.cov_prefix,
+        "cov_branches": [a.cov_prefix + n for n in F.PACK_NAMES],
+        "context": {
+            "branches": list(a.context),
+            "log_pt_branch": a.log_pt,
+            "names": list(context_names),
+        },
+        "flow": {
+            "transforms": a.transforms,
+            "hidden": list(a.hidden),
+            "bins": a.bins,
+            "n_features": len(idx),
+            "n_context": len(context_names),
+        },
+        "seed": a.seed,
+        "dtype": a.dtype,
+        "files": {
+            "flow_mc": "flow_mc.pt",
+            "flow_data": "flow_data.pt",
+            "scalers": "scalers.json",
+            "onnx": onnx,
+            "report": "report.json",
+        },
+    }
+    try:
+        import torch as _t
+        man["torch_version"] = _t.__version__
+    except Exception:
+        pass
+    try:
+        import zuko as _z
+        man["zuko_version"] = getattr(_z, "__version__", "unknown")
+    except Exception:
+        pass
+
+    written = []
+    for d in [out_dir] + ([extra_dir] if extra_dir else []):
+        os.makedirs(d, exist_ok=True)
+        p = os.path.join(d, "covflow.json")
+        with open(p, "w") as fh:
+            json.dump(man, fh, indent=2)
+            fh.write("\n")
+        written.append(p)
+    return written
 
 
 def _expand(globs):
@@ -539,6 +633,12 @@ def main():
     FL.save_flow(flow_mc, os.path.join(a.out, "flow_mc.pt"))
     FL.save_flow(flow_data, os.path.join(a.out, "flow_data.pt"))
 
+    # written here, not at the end: if validation or plotting dies later, the
+    # run directory is still a usable model rather than an unlabelled blob
+    for p in write_manifest(a.out, a, mc.context_names, idx,
+                            extra_dir=a.manifest_dir):
+        print(f"[manifest] {p}")
+
     # ---- training history: NLL and learning rate vs epoch ---------------
     # Kept because the shape of these curves is diagnostic in its own right:
     # a validation loss that swings by more than it improves means the
@@ -731,7 +831,8 @@ def main():
                     y_mc, mc.w, mc.C, y_corr, y_dat_raw, dat.w, dat.C,
                     pedges, mc.context_names, feature_indices=idx,
                     path=os.path.join(a.out, "marginals_binned.pdf"),
-                    min_count=max(a.closure_min_count // 2, 50), param=a.param)
+                    min_count=max(a.closure_min_count // 2, 50), param=a.param,
+                    cells_per_page=a.plot_cells_per_page)
             except Exception as e:
                 print(f"[warn] binned marginal plots failed: {e}")
 
@@ -769,6 +870,13 @@ def main():
             except Exception as e:
                 rep["onnx_error"] = str(e)
                 print(f"[warn] ONNX export failed: {e}")
+
+    # rewrite now that the ONNX name (if any) is known
+    write_manifest(a.out, a, mc.context_names, idx,
+                   onnx=("corrector.onnx"
+                         if os.path.exists(os.path.join(a.out, "corrector.onnx"))
+                         else None),
+                   extra_dir=a.manifest_dir)
 
     with open(os.path.join(a.out, "report.json"), "w") as fh:
         json.dump(rep, fh, indent=2)

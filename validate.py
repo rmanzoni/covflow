@@ -518,7 +518,8 @@ def plot_binned_marginals(y_mc, w_mc, C_mc, y_corr,
                           y_data, w_data, C_data,
                           edges, context_names, feature_indices=None,
                           path="marginals_binned.pdf", min_count=200,
-                          param="logsigma_corr", max_cells=64):
+                          param="logsigma_corr", max_cells=None,
+                          cells_per_page=24):
     """
     One page per feature; on each page, a grid of context cells showing
     data / MC / corrected MC.
@@ -531,7 +532,21 @@ def plot_binned_marginals(y_mc, w_mc, C_mc, y_corr,
 
     The grid is laid out with the LAST context dimension along columns and all
     earlier dimensions folded into rows, so a 2-D context reads as a natural
-    (dim0 x dim1) matrix.
+    (dim0 x dim1) matrix. When there are more cells than fit on one page, the
+    ROWS are split across pages and the columns are left alone, so every page
+    still reads as that matrix and the same column always means the same bin
+    of the last context variable.
+
+    cells_per_page : rounded DOWN to a whole number of columns. There used to
+                     be a hard ceiling here instead (max_cells=64), which
+                     turned a fine-grained --plot-bins into a lost plot. The
+                     ceiling was solving a real problem the wrong way: with
+                     everything on one page, 360 cells at 4 columns is a figure
+                     90 rows tall, i.e. about 17 feet of paper that no viewer
+                     will render usefully. Paginating solves it without taking
+                     the choice away.
+    max_cells      : optional hard refusal, off by default. Set it if you want
+                     a run to fail rather than spend ten minutes drawing.
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -544,9 +559,8 @@ def plot_binned_marginals(y_mc, w_mc, C_mc, y_corr,
     im, shape = assign_bins(C_mc, edges)
     idd, _ = assign_bins(C_data, edges)
     ncell = int(np.prod(shape))
-    if ncell > max_cells:
-        raise ValueError(f"{ncell} context cells exceeds max_cells={max_cells}; "
-                         f"use coarser --closure-bins for the plots")
+    if max_cells is not None and ncell > max_cells:
+        raise ValueError(f"{ncell} context cells exceeds max_cells={max_cells}")
 
     # Grid layout: ignore context dimensions that have only one bin, otherwise
     # a trailing singleton (e.g. --plot-bins 3,3,1,1) collapses the grid to a
@@ -559,57 +573,78 @@ def plot_binned_marginals(y_mc, w_mc, C_mc, y_corr,
     else:
         ncols = 1
     ncols = max(1, min(ncols, ncell))
-    nrows = int(np.ceil(ncell / ncols))
+
+    # cells per page, rounded down to full rows so the column meaning holds
+    per_page = max(int(cells_per_page), ncols)
+    per_page = max(ncols, (per_page // ncols) * ncols)
+    # never taller than the cells actually need, or a small binning gets a page
+    # of mostly blank axes
+    rows_per_page = min(per_page // ncols, int(np.ceil(ncell / ncols)))
+    per_page = rows_per_page * ncols
+    n_pages = int(np.ceil(ncell / per_page))
 
     # cell occupancy, so sparse cells are drawn but visibly marked
     counts = [(int((im == c).sum()), int((idd == c).sum())) for c in range(ncell)]
 
+    total = n_pages * len(idx)
+    print(f"[plot] binned marginals: {ncell} cells x {len(idx)} features "
+          f"-> {total} page(s) of {rows_per_page}x{ncols}")
+    if total > 100:
+        print(f"[plot] that is {total} pages and roughly "
+              f"{ncell * len(idx) * 3:,} histograms; it will take a while")
+
     with PdfPages(path) as pdf:
         for k in idx:
-            fig, axes = plt.subplots(nrows, ncols,
-                                     figsize=(2.6 * ncols, 2.3 * nrows),
-                                     squeeze=False)
-            for c in range(nrows * ncols):
-                ax = axes[c // ncols][c % ncols]
-                if c >= ncell:
-                    ax.axis("off")
-                    continue
-                nm, nd = counts[c]
-                if nm < min_count or nd < min_count:
-                    ax.text(0.5, 0.5, f"n={nm}/{nd}\ntoo few",
-                            ha="center", va="center", fontsize=7,
-                            color="0.6", transform=ax.transAxes)
-                    ax.set_xticks([]); ax.set_yticks([])
-                    ax.set_title(cell_label(c, shape, context_names, edges),
-                                 fontsize=5.5, color="0.6")
-                    continue
-                sm, sd = im == c, idd == c
-                lo, hi = _wq(y_data[sd, k], w_data[sd], [0.005, 0.995])
-                if not np.isfinite(lo) or hi <= lo:
-                    lo, hi = float(y_data[sd, k].min()), float(y_data[sd, k].max())
-                bins = np.linspace(lo, hi, 30)
-                ax.hist(y_data[sd, k], bins=bins, weights=w_data[sd], density=True,
-                        histtype="stepfilled", alpha=0.35, color="C0")
-                ax.hist(y_mc[sm, k], bins=bins, weights=w_mc[sm], density=True,
-                        histtype="step", lw=1.1, color="C1")
-                ax.hist(y_corr[sm, k], bins=bins, weights=w_mc[sm], density=True,
-                        histtype="step", lw=1.1, color="C2")
-                wb = weighted_w1(y_mc[sm, k], w_mc[sm], y_data[sd, k], w_data[sd])
-                wa = weighted_w1(y_corr[sm, k], w_mc[sm], y_data[sd, k], w_data[sd])
-                worse = wa > 1.1 * wb
-                ax.set_title(f"{cell_label(c, shape, context_names, edges)}\n"
-                             f"W1 {wb:.3f}$\\to${wa:.3f}  n={nm}/{nd}",
-                             fontsize=5.5, color=("firebrick" if worse else "black"))
-                ax.tick_params(labelsize=5)
-            # one legend for the page
-            handles = [plt.Line2D([], [], color="C0", lw=6, alpha=0.35, label="data"),
-                       plt.Line2D([], [], color="C1", lw=1.5, label="MC"),
-                       plt.Line2D([], [], color="C2", lw=1.5, label="MC corr")]
-            fig.legend(handles=handles, loc="upper right", fontsize=8, ncol=3)
-            fig.suptitle(names[k], fontsize=12, y=0.999)
-            fig.tight_layout(rect=(0, 0, 1, 0.97))
-            pdf.savefig(fig)
-            plt.close(fig)
+            for page in range(n_pages):
+                c0 = page * per_page
+                c1 = min(c0 + per_page, ncell)
+                fig, axes = plt.subplots(rows_per_page, ncols,
+                                         figsize=(2.6 * ncols, 2.3 * rows_per_page),
+                                         squeeze=False)
+                for j in range(rows_per_page * ncols):
+                    ax = axes[j // ncols][j % ncols]
+                    c = c0 + j
+                    if c >= c1:
+                        ax.axis("off")
+                        continue
+                    nm, nd = counts[c]
+                    if nm < min_count or nd < min_count:
+                        ax.text(0.5, 0.5, f"n={nm}/{nd}\ntoo few",
+                                ha="center", va="center", fontsize=7,
+                                color="0.6", transform=ax.transAxes)
+                        ax.set_xticks([]); ax.set_yticks([])
+                        ax.set_title(cell_label(c, shape, context_names, edges),
+                                     fontsize=5.5, color="0.6")
+                        continue
+                    sm, sd = im == c, idd == c
+                    lo, hi = _wq(y_data[sd, k], w_data[sd], [0.005, 0.995])
+                    if not np.isfinite(lo) or hi <= lo:
+                        lo, hi = float(y_data[sd, k].min()), float(y_data[sd, k].max())
+                    bins = np.linspace(lo, hi, 30)
+                    ax.hist(y_data[sd, k], bins=bins, weights=w_data[sd], density=True,
+                            histtype="stepfilled", alpha=0.35, color="C0")
+                    ax.hist(y_mc[sm, k], bins=bins, weights=w_mc[sm], density=True,
+                            histtype="step", lw=1.1, color="C1")
+                    ax.hist(y_corr[sm, k], bins=bins, weights=w_mc[sm], density=True,
+                            histtype="step", lw=1.1, color="C2")
+                    wb = weighted_w1(y_mc[sm, k], w_mc[sm], y_data[sd, k], w_data[sd])
+                    wa = weighted_w1(y_corr[sm, k], w_mc[sm], y_data[sd, k], w_data[sd])
+                    worse = wa > 1.1 * wb
+                    ax.set_title(f"{cell_label(c, shape, context_names, edges)}\n"
+                                 f"W1 {wb:.3f}$\\to${wa:.3f}  n={nm}/{nd}",
+                                 fontsize=5.5, color=("firebrick" if worse else "black"))
+                    ax.tick_params(labelsize=5)
+                # one legend for the page
+                handles = [plt.Line2D([], [], color="C0", lw=6, alpha=0.35, label="data"),
+                           plt.Line2D([], [], color="C1", lw=1.5, label="MC"),
+                           plt.Line2D([], [], color="C2", lw=1.5, label="MC corr")]
+                fig.legend(handles=handles, loc="upper right", fontsize=8, ncol=3)
+                ttl = names[k] if n_pages == 1 else \
+                    f"{names[k]}   -   cells {c0 + 1}-{c1} of {ncell}"
+                fig.suptitle(ttl, fontsize=12, y=0.999)
+                fig.tight_layout(rect=(0, 0, 1, 0.97))
+                pdf.savefig(fig)
+                plt.close(fig)
     return path
 
 

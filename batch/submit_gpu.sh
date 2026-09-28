@@ -57,7 +57,7 @@ COVFLOW_SEEDS=("${COVFLOW_SEEDS[@]:-0}")
 # DefaultTime=1-00:00:00, and the `normal` QOS sets no MaxWall. Nothing caps you
 # below a week -- but a larger request is scheduled later, so raise these
 # against a measured Elapsed/MaxRSS rather than on principle.
-COVFLOW_TIME="${COVFLOW_TIME:-5:00:00}"
+COVFLOW_TIME="${COVFLOW_TIME:-8:00:00}"
 COVFLOW_MEM="${COVFLOW_MEM:-64G}"
 
 mkdir -p "${COVFLOW_OUT_BASE}"
