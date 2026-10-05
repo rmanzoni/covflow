@@ -78,9 +78,20 @@ class TrainConfig:
     diagnostics: dict = field(default_factory=dict)
 
 
-def _weighted_nll(flow, y, c, w):
+def _weighted_nll(flow, y, c, w, norm=None):
+    """
+    Weighted mean negative log-likelihood.
+
+    norm=None divides by this batch's weight sum (fine for positive weights).
+    With sWeights a batch's sum fluctuates and can be ~0 or negative, which
+    turns the per-batch normalisation into noise or division by ~0; pass the
+    GLOBAL mean weight instead, so each batch contributes an unbiased,
+    bounded-scale estimate of the same objective.
+    """
     logp = flow(c).log_prob(y)             # (B,)
-    return -(w * logp).sum() / w.sum().clamp_min(1e-12)
+    if norm is None:
+        return -(w * logp).sum() / w.sum().clamp_min(1e-12)
+    return -(w * logp).sum() / (len(w) * norm)
 
 
 def train_flow(flow, ys, cs, w, tcfg: TrainConfig, tag=""):
@@ -113,6 +124,15 @@ def train_flow(flow, ys, cs, w, tcfg: TrainConfig, tag=""):
     perm = torch.randperm(n, generator=g)
     n_val = int(tcfg.val_frac * n)
     val_idx, tr_idx = perm[:n_val].to(dev), perm[n_val:].to(dev)
+    # global normalisation for the training batches (see _weighted_nll)
+    w_norm = float(w[tr_idx].mean())
+    neg_frac = float((w[tr_idx] < 0).float().mean())
+    if w_norm <= 0:
+        raise ValueError(f"[{tag}] mean training weight {w_norm:.3g} <= 0: "
+                         f"nothing to fit")
+    if neg_frac > 0 and tcfg.verbose:
+        print(f"[{tag}] {100*neg_frac:.1f}% negative weights (sWeights): "
+              f"batches normalised by the global mean weight {w_norm:.4g}")
 
     # foreach=False is a CPU optimisation (~17% on Apple silicon, where the
     # multi-tensor path fights the unified-memory allocator). On CUDA it is the
@@ -163,10 +183,8 @@ def train_flow(flow, ys, cs, w, tcfg: TrainConfig, tag=""):
         for s in range(0, len(order), tcfg.batch_size):
             b = order[s:s + tcfg.batch_size]
             yb, cb, wb = ys[b], cs[b], w[b]
-            if wb.sum() <= 0:
-                continue
             opt.zero_grad(set_to_none=True)
-            loss = _weighted_nll(flow, yb, cb, wb)
+            loss = _weighted_nll(flow, yb, cb, wb, norm=w_norm)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(flow.parameters(), tcfg.clip_grad)
             opt.step()

@@ -57,14 +57,16 @@ def parse_args():
     p.add_argument("--data-weight-branch", default=None)
     p.add_argument("--mc-weight-branch", default=None)
     p.add_argument("--data-selection", default=None,
-                   help="numpy expression applied to data, e.g. "
-                        "'(mu1_pt > 3) & (abs(mu1_eta) < 2.4)'. Branches it "
+                   help="numpy expression applied to data IN ADDITION to "
+                        "--selection (ANDed), e.g. '(mu1_pt > 3)'. Branches it "
                         "needs are read automatically. Use & | ~ with "
                         "parenthesised comparisons, not and/or/not.")
     p.add_argument("--mc-selection", default=None,
-                   help="same, for MC; may differ from --data-selection")
+                   help="same, for MC only, ANDed with --selection (typically "
+                        "the gen-matching)")
     p.add_argument("--selection", default=None,
-                   help="shorthand: apply the same selection to data and MC")
+                   help="selection applied to BOTH data and MC; --data-selection "
+                        "and --mc-selection are ANDed with it")
     p.add_argument("--features", default="all",
                    help="feature subspace the flows are TRAINED in: "
                         "'all' (15), 'diag' (5 log-sigma), 'corr' (10 partial "
@@ -125,23 +127,36 @@ def parse_args():
                         "discrepancy is below its null-test residual cannot be "
                         "corrected, only broadened.")
     p.add_argument("--sweights", default=None, metavar="MASS_BRANCH",
-                   help="Derive sWeights in data by fitting MASS_BRANCH with a "
-                        "double-sided Crystal Ball signal plus two "
-                        "exponentials, and train the data flow on the "
-                        "background-subtracted sample. Without this the data "
-                        "flow learns the covariance of signal PLUS background, "
-                        "and the correction target is wrong by roughly the "
-                        "background fraction.")
-    p.add_argument("--sweight-window", type=float, default=0.200,
-                   help="half-width of the mass fit range in GeV (default "
-                        "0.200). A mass cut in --selection tighter than this is "
-                        "relaxed FOR THE FIT ONLY, so there is sideband left to "
-                        "constrain the background.")
+                   help="Fit the data mass (covflow.splot: two double-sided "
+                        "Crystal Balls + two exponentials, as in the 2018 "
+                        "sigma_dxy study) and train the data flow on the "
+                        "sPlot-weighted, i.e. background-subtracted, sample. "
+                        "Mass terms of the selections are replaced by the fit "
+                        "window for BOTH data and MC: the weights subtract the "
+                        "background only when summed over the whole window, "
+                        "and MC must describe the same signal. Validate the "
+                        "fit first with fit_splot.py.")
+    p.add_argument("--sweight-window", type=float, default=0.25,
+                   help="half-width of the mass fit window in GeV (default "
+                        "0.25, as in 2018 and fit_splot.py)")
     p.add_argument("--sweight-mc-mass-branch", default=None,
-                   help="fit simulated signal with this branch first and FIX "
-                        "the Crystal Ball tail parameters in the data fit. "
-                        "Strongly recommended: the two exponentials can absorb "
-                        "the signal's radiative tail, which biases the yield.")
+                   help="mass branch name in MC if it differs from data "
+                        "(e.g. jpsi_mass); used for the MC window cut and for "
+                        "--sweight-tails-from-mc")
+    p.add_argument("--sweight-signal", default="2dscb", choices=["2dscb", "dscb"])
+    p.add_argument("--sweight-tails", default="shared",
+                   choices=["shared", "independent"])
+    p.add_argument("--sweight-background", default="exp", choices=["exp", "2exp"],
+                   help="exp (default; on Run 3 data 2exp collapses to one "
+                        "component) or 2exp (the 2018 model)")
+    p.add_argument("--sweight-fit", default="binned", choices=["binned", "unbinned"])
+    p.add_argument("--sweight-fix", nargs="*", default=[], metavar="NAME=VALUE",
+                   help="hold mass-fit parameters constant, e.g. nL=3")
+    p.add_argument("--sweight-tails-from-mc", action="store_true",
+                   help="fit MC signal first and fix the tail parameters in the "
+                        "data fit. Off by default: it assumes the MC resolution "
+                        "and radiative tail match the data (check the MC used "
+                        "is the right run period)")
     p.add_argument("--reweight-bins", default=None,
                    help="context binning used for the reweighted closure only "
                         "(default: same as --closure-bins). Reweighting wants "
@@ -371,6 +386,124 @@ def _expand(globs):
     return files
 
 
+def _and(*parts):
+    """AND of the non-empty selection strings, each parenthesised."""
+    parts = [x for x in parts if x and x.strip()]
+    if not parts:
+        return None
+    return parts[0] if len(parts) == 1 else " & ".join(f"({x})" for x in parts)
+
+
+def _sweight_selections(a):
+    """
+    Selections for an sWeighted training: every mass term is removed and the
+    fit window is ANDed instead, for data AND MC.
+
+    Data: the weights subtract the background only when summed over the whole
+    window the fit was done in. Re-applying a narrower mass cut keeps the
+    peak's positive weights and discards the sideband's negative ones, so the
+    background is NOT subtracted (measured on a synthetic sample: ~9% left
+    at +-100 MeV inside a +-250 MeV fit).
+    MC: the sPlot-weighted data describe the signal in the whole window, so
+    the MC signal has to be selected in the same window.
+    """
+    from covflow.splot import JPSI_MASS
+    mb = a.sweights
+    mb_mc = a.sweight_mc_mass_branch or mb
+    w = a.sweight_window
+    common, d0 = (D.drop_terms_using(a.selection, [mb, mb_mc])
+                  if a.selection else (None, []))
+    dsel, d1 = (D.drop_terms_using(a.data_selection, [mb])
+                if a.data_selection else (None, []))
+    msel, d2 = (D.drop_terms_using(a.mc_selection, [mb_mc])
+                if a.mc_selection else (None, []))
+    win_d = f"(abs({mb} - {JPSI_MASS}) <= {w})"
+    win_m = f"(abs({mb_mc} - {JPSI_MASS}) <= {w})"
+    dropped = d0 + d1 + d2
+    print(f"[sweights] mass terms removed from the selections: "
+          f"{dropped if dropped else 'none'}")
+    print(f"[sweights] replaced by the fit window for data {win_d} and MC "
+          f"{win_m}: the sWeights are valid only summed over the whole window")
+    return (_and(common, dsel, win_d), _and(common, msel, win_m),
+            {"dropped": dropped, "data_window": win_d, "mc_window": win_m})
+
+
+def _apply_sweights(a, dat, mc, mc_mass, window_terms):
+    """
+    Fit the mass of EXACTLY the data sample that will be trained on (after
+    selection, covariance cleaning and --max-events), and set its weights to
+    the signal sWeights. Negative weights are kept: they are what subtracts
+    the background.
+    """
+    from covflow import splot as SP
+    m = np.asarray(dat.extra[a.sweights], float)
+    lo = SP.JPSI_MASS - a.sweight_window
+    hi = SP.JPSI_MASS + a.sweight_window
+    # the window cut was evaluated on the (float32) branch; do not let a
+    # float64 rounding at the edge put a selected candidate outside the model
+    lo, hi = min(lo, float(m.min())), max(hi, float(m.max()))
+    model = SP.MassModel(lo, hi, signal=a.sweight_signal, tails=a.sweight_tails,
+                         background=a.sweight_background)
+    fixed = {}
+    for tok in a.sweight_fix:
+        k, _, v = tok.partition("=")
+        fixed[k.strip()] = float(v)
+    mc_fit_summary = None
+    if a.sweight_tails_from_mc:
+        mm = np.asarray(mc.extra[mc_mass], float)
+        mm = mm[(mm >= lo) & (mm <= hi)]
+        edges = np.linspace(lo, hi, int(round((hi - lo) / 0.001)) + 1)
+        cnt, _ = np.histogram(mm, bins=edges)
+        bfix = {k: v for k, v in {"Nb": 0.0, "lam1": 0.0, "lam2": 0.0,
+                                  "fb": 0.5}.items() if k in model.names}
+        rmc = SP.fit(model, counts=cnt, edges=edges, fixed=bfix,
+                     label="MC signal")
+        SP.plot_fit(rmc, os.path.join(a.out, "sweight_fit_mc.pdf"),
+                    counts=cnt, edges=edges, rlabel="MC signal")
+        for k in model.tail_names:
+            fixed.setdefault(k, rmc.values[k])
+        mc_fit_summary = rmc.summary()
+
+    print(f"[sweights] fitting {m.size:,} candidates (the training sample "
+          f"itself) in [{lo:.4f}, {hi:.4f}] GeV")
+    if a.sweight_fit == "binned":
+        edges = np.linspace(lo, hi, int(round((hi - lo) / 0.001)) + 1)
+        cnt, _ = np.histogram(m, bins=edges)
+        res = SP.fit(model, counts=cnt, edges=edges, fixed=fixed, label="sweights")
+    else:
+        res = SP.fit(model, mass=m, fixed=fixed, label="sweights")
+    gof = SP.goodness_of_fit(res, mass=m)
+    sp = SP.SPlot(res, m)
+    SP.plot_fit(res, os.path.join(a.out, "sweight_fit.pdf"), mass=m, gof=gof,
+                rlabel="")
+    info = sp.info
+    dev = info["max_abs_sw_s_plus_sw_b_minus_1"]
+    if dev > 1e-2:
+        raise SystemExit(
+            f"[sweights] signal + background weight deviates from 1 by up to "
+            f"{dev:.2e}: the mass fit is not at a likelihood maximum, so the "
+            f"weights do not subtract the background. Tune the fit with "
+            f"fit_splot.py first (same selection, --out <dir>).")
+    if not res.valid:
+        print("[warn] MIGRAD reports the mass fit as invalid, but the weights "
+              "are consistent (fit at a maximum). With two exponentials this "
+              "is usually the background's flat direction -- check "
+              "fit_splot.py's variations before trusting the result.")
+    sw, _ = sp.weights(m)
+    dat.w = sw
+    print(f"[sweights] chi2/ndf {gof['chi2']:.0f}/{gof['ndf']}, Ns "
+          f"{res.values['Ns']:,.0f} +- {res.errors['Ns']:,.0f}, purity "
+          f"{100*res.values['Ns']/(res.values['Ns']+res.values['Nb']):.1f}%")
+    print(f"[sweights] weights on {m.size:,} data tracks: sum "
+          f"{sw.sum():,.0f}, {100*info['negative_signal_weight_fraction']:.1f}% "
+          f"negative (kept), effective N {info['effective_n_signal']:,.0f}")
+    if info["negative_signal_weight_fraction"] > 0.35:
+        print("[warn] a large fraction of sWeights are negative -- the sample "
+              "is background dominated and the subtraction will be noisy")
+    return {"fit": res.summary(), "gof": gof, "splot": info,
+            "selection": window_terms, "mc_signal_fit": mc_fit_summary}
+
+
 def main():
     a = parse_args()
     os.makedirs(a.out, exist_ok=True)
@@ -382,8 +515,15 @@ def main():
     from covflow import validate as V
 
     # ---- load ----------------------------------------------------------
-    data_sel = a.data_selection or a.selection
-    mc_sel = a.mc_selection or a.selection
+    # --selection applies to both samples; the per-sample selections are
+    # ADDED to it. (Until 3b86ae0 this was `a.data_selection or a.selection`,
+    # so giving --mc-selection for the gen-matching silently dropped every
+    # common cut from the MC.)
+    data_sel = _and(a.selection, a.data_selection)
+    mc_sel = _and(a.selection, a.mc_selection)
+    sw_window_terms = None
+    if a.sweights and not a.synthetic:
+        data_sel, mc_sel, sw_window_terms = _sweight_selections(a)
 
     dt = np.dtype(a.dtype)
     read_chunk = (int(a.read_chunk) if str(a.read_chunk).strip().isdigit()
@@ -404,11 +544,11 @@ def main():
             print(f"[load] data selection: {data_sel}")
         if mc_sel:
             print(f"[load] MC   selection: {mc_sel}")
-        if data_sel != mc_sel:
-            print("[warn] data and MC selections differ -- any resulting "
-                  "difference in the covariance distributions will be "
-                  "absorbed into the correction as if it were detector "
-                  "mismodelling")
+        if a.data_selection:
+            print("[warn] --data-selection adds cuts to data that MC does not "
+                  "get -- any resulting difference in the covariance "
+                  "distributions will be absorbed into the correction as if "
+                  "it were detector mismodelling")
         if a.sweights and a.data_weight_branch:
             raise SystemExit("--sweights and --data-weight-branch both given; "
                              "choose one source of data weights")
@@ -419,58 +559,18 @@ def main():
                           clip_negative_weights=not a.keep_negative_weights,
                           max_events=a.max_events,
                           dtype=dt, chunk_size=read_chunk)
+        mc_mass = (a.sweight_mc_mass_branch or a.sweights) if a.sweights else None
         mc = D.load_root(mf, a.tree, a.cov_prefix, a.context,
                          weight_branch=a.mc_weight_branch, log_pt_branch=a.log_pt,
                          selection=mc_sel,
+                         extra_branches=([mc_mass] if mc_mass else ()),
                          clip_negative_weights=not a.keep_negative_weights,
                          max_events=a.max_events,
                          dtype=dt, chunk_size=read_chunk)
         # ---- sWeights ------------------------------------------------
         if a.sweights:
-            from covflow import sweights as SW
-            lo = SW.JPSI_MASS - a.sweight_window
-            hi = SW.JPSI_MASS + a.sweight_window
-            fit_sel, dropped = (D.drop_terms_using(data_sel, [a.sweights])
-                                if data_sel else (None, []))
-            if dropped:
-                print(f"[sweights] relaxing for the fit only: dropped "
-                      f"{dropped} from the data selection so the fit keeps "
-                      f"sideband on both sides of the peak")
-            fit_sample = D.load_root(
-                df, a.tree, a.cov_prefix, a.context,
-                log_pt_branch=a.log_pt, selection=fit_sel,
-                extra_branches=[a.sweights])
-            mfit = fit_sample.extra[a.sweights]
-            print(f"[sweights] fit sample: {len(mfit):,} candidates "
-                  f"(vs {len(dat):,} passing the full selection)")
-
-            tails = None
-            if a.sweight_mc_mass_branch:
-                mc_fit = D.load_root(mf, a.tree, a.cov_prefix, a.context,
-                                     log_pt_branch=a.log_pt, selection=mc_sel,
-                                     extra_branches=[a.sweight_mc_mass_branch])
-                tails, _ = SW.fit_signal_tails(
-                    mc_fit.extra[a.sweight_mc_mass_branch], lo, hi)
-
-            sw_par, sw_info = SW.fit_mass(mfit, lo, hi, fixed=tails)
-            SW.plot_fit(mfit, sw_par, lo, hi,
-                        os.path.join(a.out, "sweight_fit.pdf"))
-
-            sw, _, swi = SW.compute_sweights(dat.extra[a.sweights],
-                                             sw_par, lo, hi)
-            dat.w = sw
-            print(f"[sweights] applied to {swi['n_weighted']:,} data tracks: "
-                  f"sum {swi['sum_signal_weights']:,.0f}, "
-                  f"{100*swi['negative_signal_weight_fraction']:.1f}% negative, "
-                  f"effective N {swi['effective_n']:,.0f}")
-            if swi["negative_signal_weight_fraction"] > 0.35:
-                print("[warn] a large fraction of sWeights are negative -- the "
-                      "sample is background dominated and the subtraction will "
-                      "be noisy")
-            sweight_report = {"fit": sw_info, "weights": swi,
-                              "parameters": {k: float(v) for k, v in sw_par.items()},
-                              "relaxed_terms": dropped,
-                              "fit_selection": fit_sel}
+            sweight_report = _apply_sweights(a, dat, mc, mc_mass,
+                                             sw_window_terms)
         print(f"[load] data cutflow: {dat.cutflow()}")
         print(f"[load] MC   cutflow: {mc.cutflow()}")
 
@@ -478,7 +578,9 @@ def main():
         raise SystemExit("zero rows after loading/cleaning; aborting")
     if dat.neg_weight_fraction > 0.02:
         print(f"[warn] data negative-weight fraction "
-              f"{dat.neg_weight_fraction:.3f} > 2% -- clipping biases the target")
+              f"{dat.neg_weight_fraction:.3f} > 2% in --data-weight-branch -- "
+              f"clipping them (default) biases the target; see "
+              f"--keep-negative-weights")
     print(f"[load] MC {len(mc):,} tracks, data {len(dat):,} tracks, "
           f"context = {mc.context_names}")
 

@@ -31,29 +31,44 @@ from . import features as F
 # ---------------------------------------------------------------------------
 
 def _wq(x, w, qs):
-    """Weighted quantiles."""
-    x = np.asarray(x); w = np.clip(np.asarray(w, float), 0, None)
+    """
+    Weighted quantiles. Signed weights (sWeights) are allowed: their
+    cumulative sum need not be monotone, so it is made monotone (running
+    maximum) before inversion -- the standard rearrangement, exact whenever
+    the weighted CDF is already monotone.
+    """
+    x = np.asarray(x); w = np.asarray(w, float)
     o = np.argsort(x); x, w = x[o], w[o]
     cw = np.cumsum(w) - 0.5 * w
     cw /= max(w.sum(), 1e-12)
+    cw = np.clip(np.maximum.accumulate(cw), 0.0, 1.0)
     return np.interp(qs, cw, x)
 
 
-def weighted_w1(xa, wa, xb, wb, n=512):
-    """Weighted 1-Wasserstein via quantile functions (scipy if present)."""
-    try:
-        from scipy.stats import wasserstein_distance
-        return float(wasserstein_distance(xa, xb,
-                                          u_weights=np.clip(wa, 0, None),
-                                          v_weights=np.clip(wb, 0, None)))
-    except Exception:
-        qs = (np.arange(n) + 0.5) / n
-        return float(np.mean(np.abs(_wq(xa, wa, qs) - _wq(xb, wb, qs))))
+def weighted_w1(xa, wa, xb, wb):
+    """
+    Weighted 1-Wasserstein distance, W1 = integral |F_a - F_b| dx, computed
+    exactly from the two weighted empirical CDFs on the merged support.
+    Identical to scipy.stats.wasserstein_distance for positive weights, and
+    also defined for signed weights (sWeights), which scipy rejects -- the
+    previous version clipped them to zero, i.e. compared MC with the
+    un-subtracted peak-region data.
+    """
+    xa = np.asarray(xa, float); xb = np.asarray(xb, float)
+    wa = np.asarray(wa, float); wb = np.asarray(wb, float)
+    sa, sb = wa.sum(), wb.sum()
+    if sa <= 0 or sb <= 0:
+        return float("nan")
+    x = np.concatenate([xa, xb])
+    d = np.concatenate([wa / sa, -wb / sb])
+    o = np.argsort(x, kind="mergesort")
+    x, d = x[o], d[o]
+    return float(np.sum(np.abs(np.cumsum(d)[:-1]) * np.diff(x)))
 
 
 def weighted_corr(Y, w):
-    """(N,d) -> (d,d) weighted Pearson correlation."""
-    w = np.clip(np.asarray(w, float), 0, None)
+    """(N,d) -> (d,d) weighted Pearson correlation (signed weights allowed)."""
+    w = np.asarray(w, float)
     sw = w.sum()
     mu = (w[:, None] * Y).sum(0) / sw
     Yc = Y - mu
@@ -66,9 +81,11 @@ def weighted_auc(score, label, weight):
     """
     Weighted AUC = P(score(data) > score(mc)) with ties at 0.5, via ranks.
     label: 1 for data (positive), 0 for mc.
+    Bilinear in the weights, so signed weights (sWeights) are allowed as long
+    as each class has a positive total.
     """
     score = np.asarray(score); label = np.asarray(label)
-    weight = np.clip(np.asarray(weight, float), 0, None)
+    weight = np.asarray(weight, float)
     o = np.argsort(score, kind="mergesort")
     s, lab, w = score[o], label[o], weight[o]
     # average ranks in weight units, tie-aware
@@ -110,15 +127,24 @@ def classifier_auc(Y_mc, w_mc, Y_data, w_data, scaler=None,
         Y_mc = scaler.x(Y_mc); Y_data = scaler.x(Y_data)
     X = np.concatenate([Y_mc, Y_data], 0).astype(np.float32)
     y = np.concatenate([np.zeros(len(Y_mc)), np.ones(len(Y_data))]).astype(np.float32)
-    # balance classes by weight so AUC is not driven by yield
-    w = np.concatenate([np.clip(w_mc, 0, None) / max(np.clip(w_mc,0,None).sum(),1e-9),
-                        np.clip(w_data, 0, None) / max(np.clip(w_data,0,None).sum(),1e-9)]).astype(np.float32)
+    # balance classes by weight so AUC is not driven by yield.
+    # TRAINING uses clipped weights: with negative weights the weighted BCE is
+    # unbounded below (the net can send the loss to -inf on negative-weight
+    # events). That only makes the classifier less than optimal. EVALUATION
+    # uses the signed weights, so the AUC compares MC with the
+    # background-subtracted data.
+    def _bal(wm_, wd_):
+        return np.concatenate([wm_ / max(wm_.sum(), 1e-9),
+                               wd_ / max(wd_.sum(), 1e-9)]).astype(np.float32)
+    wm_s, wd_s = np.asarray(w_mc, float), np.asarray(w_data, float)
+    w_sig = _bal(wm_s, wd_s)
+    w_clp = _bal(np.clip(wm_s, 0, None), np.clip(wd_s, 0, None))
     idx = rng.permutation(len(X))
-    X, y, w = X[idx], y[idx], w[idx]
+    X, y, w_sig, w_clp = X[idx], y[idx], w_sig[idx], w_clp[idx]
     ntr = int(0.7 * len(X))
     Xtr, Xte = X[:ntr], X[ntr:]
     ytr, yte = y[:ntr], y[ntr:]
-    wtr, wte = w[:ntr], w[ntr:]
+    wtr, wte = w_clp[:ntr], w_sig[ntr:]
 
     torch.manual_seed(seed)
     layers, d = [], X.shape[1]
@@ -307,17 +333,19 @@ def context_weights(C_mc, w_mc, C_data, w_data, edges, max_weight=50.0):
     im, shape = assign_bins(C_mc, edges)
     idd, _ = assign_bins(C_data, edges)
     ncell = int(np.prod(shape))
-    hm = np.bincount(im, weights=np.clip(w_mc, 0, None), minlength=ncell)
-    hd = np.bincount(idd, weights=np.clip(w_data, 0, None), minlength=ncell)
+    # signed weights: a cell's data content is its background-subtracted
+    # yield; a cell that comes out <= 0 gets ratio 0 below
+    hm = np.bincount(im, weights=np.asarray(w_mc, float), minlength=ncell)
+    hd = np.bincount(idd, weights=np.asarray(w_data, float), minlength=ncell)
     hm_n = hm / max(hm.sum(), 1e-12)
     hd_n = hd / max(hd.sum(), 1e-12)
     uncovered = float(hd_n[(hm <= 0) & (hd > 0)].sum())
     with np.errstate(divide="ignore", invalid="ignore"):
         ratio = np.where(hm_n > 0, hd_n / np.maximum(hm_n, 1e-12), 0.0)
     ratio = np.clip(ratio, 0.0, max_weight)
-    w = np.clip(w_mc, 0, None) * ratio[im]
+    w = np.asarray(w_mc, float) * ratio[im]
     if w.sum() > 0:
-        w *= np.clip(w_mc, 0, None).sum() / w.sum()
+        w *= np.asarray(w_mc, float).sum() / w.sum()
     info = {"uncovered_data_fraction": uncovered,
             "max_ratio": float(ratio.max()),
             "clipped_cells": int((ratio >= max_weight).sum()),
@@ -672,9 +700,9 @@ def plot_marginals(y_mc, w_mc, y_data, w_data, y_corr, param="logsigma_corr",
 
 
 def _wstats(x, w):
-    """Weighted mean and standard deviation, negative weights clipped."""
+    """Weighted mean and standard deviation (signed weights allowed)."""
     x = np.asarray(x, float)
-    w = np.clip(np.asarray(w, float), 0, None)
+    w = np.asarray(w, float)
     s = w.sum()
     if s <= 0:
         return float("nan"), float("nan")
@@ -686,7 +714,7 @@ def _wstats(x, w):
 def _whist(x, w, edges):
     """Weighted density histogram: integrates to 1 over `edges`."""
     h, _ = np.histogram(np.asarray(x, float), bins=edges,
-                        weights=np.clip(np.asarray(w, float), 0, None))
+                        weights=np.asarray(w, float))
     width = np.diff(edges)
     tot = (h * width).sum()
     return h / tot if tot > 0 else h
@@ -708,9 +736,10 @@ def plot_context(C_mc, w_mc, C_data, w_data, context_names,
     populate a joint region that MC barely covers, and it is the joint cells
     that the flow actually has to extrapolate into.
 
-    Negative weights (sWeights) are clipped to zero for these diagnostics --
-    densities and quantiles are not defined otherwise -- and the clipped
-    fraction is reported so the size of that approximation is visible.
+    Negative weights (sWeights) are used as they are: the histograms, means
+    and widths are then those of the background-subtracted sample. Quantiles
+    use the monotone rearrangement in _wq. The negative-weight fraction is
+    reported.
 
     `n_bins` is an int or a per-dimension sequence, and should normally be the
     closure binning so these numbers line up with `binned_closure`.
@@ -727,12 +756,12 @@ def plot_context(C_mc, w_mc, C_data, w_data, context_names,
     k = C_mc.shape[1]
     if len(context_names) != k:
         raise ValueError(f"{len(context_names)} names for {k} context dims")
-    wm = np.clip(np.asarray(w_mc, float), 0, None)
-    wd = np.clip(np.asarray(w_data, float), 0, None)
+    wm = np.asarray(w_mc, float)
+    wd = np.asarray(w_data, float)
 
     rep = {"context_names": list(context_names),
            "n_mc": int(len(C_mc)), "n_data": int(len(C_data)),
-           "clipped_negative_weight_fraction": {
+           "negative_weight_fraction": {
                "mc": float(np.mean(np.asarray(w_mc, float) < 0)),
                "data": float(np.mean(np.asarray(w_data, float) < 0))}}
 
