@@ -346,6 +346,12 @@ The result is MC-like ("B, raw"). covflow then corrects it like any MC track ("B
 | A and B agree on average but not track by track, or differ in the tails | **route B**: its per-track behaviour comes from the fit, not from a learned quantile |
 | B, raw does not close on MC's own no-L1 tracks | V or H is wrong: fix B before using either |
 
+**Status after the 2026 tests (section 9.8):**
+
+- the mixture test is clean (W0 = D0 within ~3%), so route A is the primary route;
+- route B with one hit error per |η| bin does not close beyond |η| ≈ 0.5, so it is a check only centrally until the relative hit error V = k · H C Hᵀ is in;
+- D1 kills need no covariance change.
+
 With route B the last step (6) is to retrain covflow's MC side on the emulated MC (`WRITE_TREE = 1` in `run_hitemu.csh`; `emu_<epoch>_routeB.json` lists which branches are replaced).
 
 ---
@@ -359,6 +365,7 @@ Three iterations, read in order:
 | 9.1–9.5 | 300k events (first 13 runs), first code | the L1 kill works; data also lose L2/L3 (the main finding); a D1 closure problem (a code bug, fixed in 9.3); a slow MC pass |
 | 9.6 | kill maps on the full year | 7 run ranges; fallback negligible; D1 disk-edge mismatch between data and MC; cap raised to 3 |
 | 9.7 | emulation on the full year | closure −0.002/−0.003; L2/L3/D2 loss confirmed; low-hit muons are physical; 5.5 min for the year |
+| 9.8 | no-L1 study on the full year | mixture test clean, so route A is primary; route B's single hit error fails beyond \|η\| ≈ 0.5 (fix: V = k · H C Hᵀ); D1 kills need no covariance change |
 
 Two commands were run on t3ui07:
 
@@ -649,6 +656,79 @@ The two changes of section 9.4 were enough: the reading step capped to `--max-ev
 2. routes A/B in the emulation;
 3. the Bmmm hit-mask patch.
 
+### 9.8 Fourth iteration: the no-L1 study on full 2026 (mixture test, hit errors)
+
+`noL1_data_study.py` was run on all of 2026, on data and on MC (`--split-test`). It answers two questions:
+
+- (a) are the data tracks without L1 one population? This is the mixture test, which decides whether route A's target is clean.
+- (b) can route B reproduce them by removing the hit with one fitted hit error per |η| bin?
+
+![mixture and route B](docs/hitemu_figs/f17_mixture_routeB.png)
+
+*Left: mixture test, median σ of W0 (no hit, working cell) against D0 (no hit, dead cell), per track parameter, data and MC, L1 and D1. Middle: route B closure, median log10 σ after removing the hit from W1 tracks minus that of D0 tracks, against |η|. Right (drawing, illustrative numbers): why one hit error per bin gets stuck.*
+
+**1. The mixture test passes: the tracks without the hit are one population.**
+
+| | largest \|shift\| in σ(d_xy), σ(d_sz) | width ratio | KS |
+|---|---|---|---|
+| data L1 | 0.008 (1.8%) | 1.01 / 1.04 | 0.03 |
+| data D1 | 0.002 | 1.02 / 1.00 | ≤ 0.014 |
+| MC L1 | 0.013 (2.9%) | 1.02 / 1.00 | ≤ 0.03 |
+| MC D1 | 0.005 | 1.01 / 1.06 | ≤ 0.04 |
+
+All shifts are at or below ~3%, against a factor ~1.6–2 between tracks with and without L1. The few slightly larger values (data σ(q/p) and σ(λ) +0.012, MC σ(φ) −0.019) are in parameters the L1 hit hardly affects. **A data track that lost L1 in a working module looks like one that crossed a dead module: route A's target is clean.**
+
+![data L1](docs/hitemu_figs/r08_nol1_L1_data.png)
+
+*Real page, data L1: W1 (blue, with hit), W0 (orange), D0 (black). In σ(d_xy) and σ(d_sz) W0 and D0 lie on top of each other, both ~0.2 in log10 above W1.*
+
+![MC L1](docs/hitemu_figs/r09_nol1_L1_mc.png)
+
+*Same page on MC: W0 = D0 again; the gap to W1 is ~0.3 in log10. In MC the dead L1 cells are only at |η| > 1, where removing L1 costs more.*
+
+Two side observations from the counts on the first page:
+
+- **In 2026 data almost no L1 cell is fully efficient.** Only 53k tracks cross cells with ε ≥ 0.95, against 243k in dead cells (ε ≤ 0.4) and 1.13M in cells in between. The L1 loss is not just whole dead modules; much of it is partial inefficiency. The kill maps handle that (P_kill is continuous); the mixture test only probes the two extremes.
+- **Losing D1 barely changes the covariance:**
+
+![data D1](docs/hitemu_figs/r10_nol1_D1_data.png)
+
+*Real page, data D1: W1, W0 and D0 almost coincide in all five parameters. For forward tracks the impact parameters are set by L1 and L2, and D1 adds little.*
+
+So a D1 kill needs **no covariance change**, only the context change. The route B fit says the same: it pushes the D1 hit error to the 500 µm limit, which means "remove nothing", and still closes.
+
+**2. Route B, as implemented, does not close for L1 beyond |η| ≈ 0.5.** After removing the L1 hit from W1 tracks with the fitted hit error, the median σ is compared with D0:
+
+| \|η\| | 0–0.5 | 0.5–1 | 1–1.5 | 1.5–2 | 2–2.5 |
+|---|---|---|---|---|---|
+| data σ(d_xy) | 0.000 | 0.000 | −0.012 | −0.047 | −0.078 |
+| data σ(d_sz) | 0.000 | −0.015 | −0.070 | **−0.162** | **−0.239** |
+| MC σ(d_xy) | – | – | **−0.198** | **−0.282** | **−0.328** |
+| MC σ(d_sz) | – | – | **−0.185** | **−0.244** | **−0.277** |
+
+Negative means route B removes too little information: the result is still too precise, by up to a factor 1.7 (data, d_sz) and 2.1 (MC).
+
+**Why** (right panel): removing a hit is only defined if V − H C Hᵀ is positive definite, i.e. if the hit error V is larger than the track's own predicted position error at that layer, H C Hᵀ. That quantity varies a lot from track to track, with momentum, angle and cluster shape. With one V per |η| bin, V must clear H C Hᵀ for 98% of the tracks (the fit's tolerance). In every bin above |η| = 0.5 the fit sits exactly at that limit: 2.0% of the tracks not positive definite (0.6% in the central bin, which closes). V is therefore pinned by the tracks with the largest H C Hᵀ, and is far too large for the typical track. A large V means little information removed, hence a too-small C′. The effect grows with |η|, where L1 carries most of the z information, so σ(d_sz) suffers most.
+
+This is a limitation of the "one hit error per bin" model, not of the method. The synthetic samples used a single hit error per surface, which is why they closed. The natural fix is a hit error relative to each track, **V = k · H C Hᵀ** with one factor k > 1 fitted per |η| bin. It is positive definite for every track by construction, and removes the same *fraction* of information from every track. It also gives the closed form C′ = C + C Hᵀ (H C Hᵀ)⁻¹ H C / (k − 1).
+
+**What this means for the routes**
+
+- **Route A** has a clean target (item 1) and does not depend on hit errors. It is now the primary route.
+- **Route B** is usable as an independent check only at |η| < 0.5 until the relative hit error is implemented. Then it must close on MC first (the MC rows above), before being compared with A.
+- **D1 kills** need no covariance change in either route.
+
+**Next:**
+
+1. run routes on the full year: A with the trained flows; B at |η| < 0.5 only, as a cross-check:
+   ```tcsh
+   python emulate_hit_loss.py --epoch 2026 --killmaps test_km/killmaps_2026 --route A B \
+          --flow-dir "<RUNS>/@epoch@/@mu@/task_0" \
+          --hit-errors test_nol1_mc/hiterrors_mc_2026.json test_nol1/hiterrors_data_2026.json --out test_emu_routes
+   ```
+2. implement the relative hit error (V = k · H C Hᵀ) in route B and refit (on request);
+3. the Bmmm hit-mask patch (on request).
+
 ---
 
 ## 10. Approximations, open items, speed
@@ -659,7 +739,7 @@ The two changes of section 9.4 were enough: the reading step capped to `--max-ev
 4. **MC share per run range** = share of selected data events, which includes trigger and selection efficiency. `--lumi-csv` takes the brilcalc recorded luminosity instead.
 5. **Uncorrectable cells** (MC dead where data works) cannot be emulated by removing hits. In 2026 they are mostly the D1+ outer edge, where data's disk extends ~1.5 mm further than MC's (section 9.6). With cap 1.5 they leave 0.9% of the D1+ efficiency missing; with the new default cap 3, 0.4%, at the price of weights up to 3 on those few tracks. Inside the nominal acceptance it is below 0.2% on every surface.
 6. **Fallback cells** (level 2) take MC's pattern scaled to the data total: data-only dead modules in a sparse cell are spread over the surface. They hold few probes by definition, and with the full sample most of them become level 1 (same cell, neighbouring months).
-7. **Route B hit errors** are one (σ_u, σ_v) per \|η\| bin. Tracks whose own error is larger are redone with a larger V (reported as `inflated`).
+7. **Route B hit errors** are one (σ_u, σ_v) per \|η\| bin. On 2026 data and MC this does not close beyond \|η\| ≈ 0.5 (section 9.8): V is pinned by the positive-definiteness of the widest tracks. To be replaced by a per-track relative error V = k · H C Hᵀ.
 8. **Route A** uses the flows as trained on non-emulated MC: f_MC is evaluated at the original context, where MC is plentiful.
 9. **Offline only.** The smearing δ ~ N(0, C′ − C) is applied here only to the beam-spot IP-significance check. Production needs the kill step, the chosen route and the smearing in Bmmm before the vertex fits; the functions in `hitemu.py` are plain numpy.
 10. **Early epochs** (2022–2023) have few dead cells, so the hit-error fits may be empty. `EXTRA_HITERR` in `run_hitemu.csh` can point to a later epoch's fits.
