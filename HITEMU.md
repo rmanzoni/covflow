@@ -27,7 +27,7 @@ Figures with a name starting with `f` are drawings, or are made from real 2026 n
 
 covflow corrects the MC track covariance (5×5) towards data with a normalising flow. That flow is *conditioned* on a **context**: pt, η, φ and the hit pattern (how many pixel hits, which BPix layer and which FPix disk come first). The correction is only meaningful if MC and data tracks with the **same context** are comparable.
 
-In 2026 they are not comparable, because the pixel detector in data has lost many more modules than the MC conditions (Summer24) know about:
+In 2026 they are not comparable, because the pixel detector in data has lost many more modules than the MC conditions (Summer24) know about. The figure shows the **hit efficiency** ε, written `eps` in the code and plots (section 1): the fraction of muons crossing a piece of detector that leave a valid hit there.
 
 ![problem](docs/hitemu_figs/f02_problem_2026.png)
 
@@ -37,7 +37,7 @@ In 2026, **one data track in three has no L1 hit, compared with a few per cent i
 
 Reweighting MC in (pt, η, φ, z0) to the data hit pattern does not work: the hit loss is localised in (z, φ) cells that are dead in data and working in MC, so the MC tracks that "should" have lost the hit are a tiny minority and get weights up to ~10³.
 
-**The approach here: make the MC lose the same hits as data, track by track.** In a cell where data is 40% efficient and MC 97%, each MC hit is removed with probability 1 − 0.40/0.97 = 0.59. The MC then has the data hit pattern, with weights ≈ 1. Two questions remain:
+**The approach here: make the MC lose the same hits as data, track by track.** In a cell where the hit efficiency is 40% in data and 97% in MC (ε_data = 0.40, ε_MC = 0.97), each MC hit is removed with probability 1 − 0.40/0.97 = 0.59. The MC then has the data hit pattern, with weights ≈ 1. Two questions remain:
 
 1. which hits to remove, and when in the year (steps 1–3);
 2. what the covariance of an MC track becomes once its hit is gone (steps 4–5, routes A and B).
@@ -50,18 +50,20 @@ Reweighting MC in (pt, η, φ, z0) to the data hit pattern does not work: the hi
 
 *Left: r-z view of the Phase-1 pixel detector: four barrel layers L1–L4 (r = 2.9, 6.8, 10.9, 16.0 cm, |z| < 26.6 cm) and three disks per side D1–D3 (|z| = 29.1, 39.6, 51.6 cm, 4.5 < r < 14.8 cm). A central track crosses the four layers; a forward track crosses L1 and then the disks. Right: what the emulation does to one MC muon whose L1 crossing falls in a cell that is dead in data.*
 
+> **The one symbol to remember: ε (written `eps` in the code and plots) = hit efficiency**, the fraction of tracks crossing a piece of detector that leave a valid hit there. ε_data and ε_MC are that fraction in data and in MC.
+
 | word | meaning |
 |---|---|
 | **crossing** | the point (z, φ) where a muon's helix, from its PCA to the PV, crosses a pixel surface (L1, or D1±: r, φ). Computed from pt, η, φ, charge, PV x/y and z0 = pv_z + dz, in a 3.8 T field. Helix formulas: barrel z_L = z0 + s_L·sinh η with s_L = 2R·asin(r_L / 2R); disk s_D = (z_D − z0) / sinh η, r_D = 2R·sin(s_D / 2R); R[m] = pt / (0.2998 · 3.8). |
 | **in acceptance** | the crossing is on the sensitive surface: \|z\| < 26.6 cm on L1, 4.5 < r < 14.8 cm on D1. |
 | **cell** | a bin of the surface. L1: 48 bins in φ × bins of one ROC pitch (0.83 cm) in z, so 3072 cells in acceptance. D1±: 48 in φ × 20 in r. |
 | **probe** | a muon that crosses the surface in acceptance and has at least 2 other valid pixel hits (so that the track is certainly a good track and did not need the surface hit to be reconstructed). |
-| **efficiency ε of a cell** | (probes with a valid hit on that surface) / (probes). "Valid L1 hit" = `pix_first_b_layer == 1`; "valid D1 hit" = `pix_first_e_disk == 1`. MC probes are weighted with `pu_weight_<year>`. |
-| **ε_data, ε_MC** | the efficiency of the same cell in data and in MC. |
+| **ε = "eps" = hit EFFICIENCY** | ε is the Greek letter epsilon. **Wherever you read ε, or `eps` in the scripts, plots, logs and option names (`eps_data`, `eps_MC`, `eps L1`, `--eps-dead`), it means the HIT EFFICIENCY of a cell:** of the probes that cross the cell, the fraction that has a valid hit there. ε = (probes with a valid hit) / (probes). "Valid L1 hit" = `pix_first_b_layer == 1`; "valid D1 hit" = `pix_first_e_disk == 1`. MC probes are weighted with `pu_weight_<year>`. ε = 1: every track has the hit; ε = 0.6: 40% of the tracks lose it; ε = 0: dead module. |
+| **ε_data, ε_MC (`eps_data`, `eps_MC`)** | the hit efficiency of the same cell measured in data and in MC. |
 | **P_kill** | probability to remove an existing MC hit in a cell: 1 − ε_data/ε_MC, used where ε_data < ε_MC. |
 | **run range** | a block of consecutive runs with roughly constant efficiency, found automatically. Each has its own data maps. |
 | **fallback level** | how a cell got its ε_data when it has too few probes (section 3.3): 0 own value, 1 neighbouring run ranges, 2 surface average, 3 nothing. |
-| **uncorrectable cell** | ε_data > 1.5·ε_MC: MC has too few hits there to reproduce data (section 3.4). |
+| **uncorrectable cell** | ε_data > 3 · ε_MC (`--max-weight`, 1.5 before Oct 2026): the data hit efficiency is so much higher than MC's that MC has too few hits there to reproduce data (section 3.4). |
 | **context** | the covflow conditioning variables. Here, the part that changes: `n_pix`, `n_pix_b`, `n_pix_e`, first BPix layer (0 = none, 1–4), first FPix disk (0 = none, 1–3). |
 | **TV (total variation)** | distance between two distributions: ½ Σ \|f_data − f_MC\|. 0 = identical, 1 = disjoint. It equals the fraction of MC tracks that would have to change category to match data (section 5). |
 | **W1, W0, D0** | data tracks crossing a working L1 cell with a hit (W1) or without a hit (W0), and crossing a dead L1 cell, hence without a hit (D0) (section 6). |
@@ -103,10 +105,10 @@ tcsh run_hitemu.csh                 # or: tcsh run_hitemu.csh 2024 2025 2026
 `build_kill_maps.py` makes three passes over the ntuples:
 
 1. per-run L1 and D1 efficiency in data, to find the run ranges;
-2. data maps ε_data(cell) per run range;
-3. the MC map ε_MC(cell), one for the whole MC.
+2. data maps of the hit efficiency, ε_data(cell), per run range;
+3. the MC map of the hit efficiency, ε_MC(cell), one for the whole MC.
 
-It then turns each pair (ε_data, ε_MC) into an action: remove MC hits, reweight MC tracks, or do nothing.
+(Reminder: ε, `eps` in the outputs, is the hit efficiency of a cell, section 1.) It then turns each pair (ε_data, ε_MC) into an action: remove MC hits, reweight MC tracks, or do nothing.
 
 ### 3.1 Run ranges: why, and how they are found
 
@@ -134,13 +136,13 @@ The same page in the kill-maps PDF, real full-2026 run (top: L1, bottom: D1; ora
 
 ### 3.2 From probes to efficiency maps
 
-For every probe, the cell of its crossing is filled in a "probes" map and, if the hit is valid, in a "hits" map. ε = hits / probes per cell, per run range in data and once in MC.
+For every probe, the cell of its crossing is filled in a "probes" map and, if the hit is valid, in a "hits" map. The hit efficiency is ε = hits / probes per cell, per run range in data and once in MC.
 
 ### 3.3 Cells with too few probes: fallback levels
 
 A cell needs at least 30 probes (`--min-cell`) for its own efficiency to be trusted. Otherwise:
 
-| level | ε_data of the cell is taken from | when |
+| level | the data hit efficiency ε_data of the cell is taken from | when |
 |---|---|---|
 | 0 | the cell itself, in this run range | ≥ 30 probes |
 | 1 | the same cell summed over the neighbouring run ranges (the narrowest window with ≥ 30 probes), scaled by (this range's surface average) / (the window's surface average) | sparse in this range, but not over the year |
@@ -157,11 +159,11 @@ How many cells fall back depends almost only on statistics and on z: the luminou
 
 *Expected L1 probes per kill-map cell (estimated from the full-2026 probe map, scaled). Green: own measurement (level 0). Orange: fallback. Violet: practically no probes. The test (left: 41% / 40% / 19%) matches the log line `1156/0/1276/640` (38% / 42% / 21%). With the full sample about half the cells of each run range are measured directly; the rest use level 1, i.e. the same cell over the neighbouring months. In data probes rather than cells, the full-year run puts **95.6% of the L1 probes, 92.5% of D1+ and 87.9% of D1− in level-0 cells, and only 0.0–0.4% in level 2**: the fallback no longer matters. The right panel shows why the outer |z| region is empty in data and MC alike.*
 
-### 3.4 From (ε_data, ε_MC) to an action
+### 3.4 From the two hit efficiencies (ε_data, ε_MC) to an action
 
 ![P_kill and weights](docs/hitemu_figs/f06_pkill_weights.png)
 
-*Left: what is done to a cell as a function of ε_data/ε_MC. Right: three example cells with 1000 MC muons each, before (grey) and after (orange) the emulation; after = ε_data in all three.*
+*Left: what is done to a cell as a function of the ratio of hit efficiencies, ε_data/ε_MC (`eps_data/eps_MC` in the figure). Right: three example cells with 1000 MC muons each, before (grey) and after (orange) the emulation; after = ε_data in all three.*
 
 - **ε_data < ε_MC (most cells in 2025–2026):** each existing MC hit is removed with P_kill = 1 − ε_data/ε_MC. The MC efficiency becomes ε_MC · (1 − P_kill) = ε_data. Nothing is weighted.
 - **ε_data > ε_MC:** hits cannot be created. Instead, MC muons with a hit get weight w_hit = ε_data/ε_MC and those without get w_nohit = (1 − ε_data)/(1 − ε_MC), floored at 0.2. The weighted MC efficiency is then ε_data. The event weight is the product over the two muons.
@@ -171,9 +173,11 @@ How much the uncorrectable cells matter, on the full 2026 sample:
 
 ![uncorrectable](docs/hitemu_figs/f07_uncorrectable_D1.png)
 
-*Left and middle: every D1 cell of full 2026, ε_data against ε_MC (point size ∝ data probes). Below the diagonal: hits are removed. Red, above the dashed line: uncorrectable. These are cells where Summer24 MC is partly dead and 2026 data is not (median ε_MC 0.11 against ε_data 0.39 on D1+). Right: the efficiency left missing after the emulation as a function of the cap. On D1+ it falls from 1.1% at cap 1.5 to 0.6% at cap 3. L1 is never a problem: data is almost everywhere worse than MC there. On the kill maps' own (coarser) cells most of the D1+ uncorrectable probes turn out to sit at the outer edge of the disk (section 9.6).*
+*Left and middle: every D1 cell of full 2026, data hit efficiency ε_data against MC hit efficiency ε_MC (`eps_data`, `eps_MC` on the axes; point size ∝ data probes). Below the diagonal: hits are removed. Red, above the dashed line: uncorrectable. These are cells where Summer24 MC is partly dead and 2026 data is not (median ε_MC 0.11 against ε_data 0.39 on D1+). Right: the efficiency left missing after the emulation as a function of the cap. On D1+ it falls from 1.1% at cap 1.5 to 0.6% at cap 3. L1 is never a problem: data is almost everywhere worse than MC there. On the kill maps' own (coarser) cells most of the D1+ uncorrectable probes turn out to sit at the outer edge of the disk (section 9.6).*
 
 ### 3.5 What to look at in `killmaps_<epoch>.pdf`
+
+In this PDF `eps_data` and `eps_MC` are the hit efficiencies ε_data and ε_MC (section 1).
 
 | page | look for | worry if |
 |---|---|---|
@@ -192,7 +196,7 @@ For every selected MC event, `emulate_hit_loss.py` does the following.
 
 1. **Pick a run range** at random with the luminosity shares.
 2. **For each muon**, compute the L1 and D1± crossings (the same helix as in the maps).
-3. **Remove the L1 hit** with probability P_kill(range, L1 cell) if the muon has an L1 hit (`first_b == 1`). Same for D1.
+3. **Remove the L1 hit** with probability P_kill(range, L1 cell) = 1 − ε_data/ε_MC (ratio of the hit efficiencies) if the muon has an L1 hit (`first_b == 1`). Same for D1.
 4. **Update the context** (right panel of the detector figure in section 1):
    - n_pix and n_pix_b (or n_pix_e) decrease by 1;
    - the first BPix layer becomes the **next layer the helix crosses in acceptance** (L2, else L3, else L4, else none), and likewise for the disks.
@@ -211,7 +215,7 @@ For every selected MC event, `emulate_hit_loss.py` does the following.
 
 Two checks, both in `emu_<epoch>.pdf` and in the printed summary.
 
-**Per-cell closure.** For each L1 / D1± cell: the *measured* data efficiency (raw hits / probes, summed over run ranges) against the emulated-MC efficiency, both averaged with the data probes of the cell as weights. Two columns are printed:
+**Per-cell closure.** For each L1 / D1± cell: the *measured* data hit efficiency ε_data (raw hits / probes, summed over run ranges) against the emulated-MC efficiency, both averaged with the data probes of the cell as weights. Two columns are printed:
 
 - **all cells**;
 - **measured cells only** (≥ 30 data probes), where the per-cell comparison is meaningful.
@@ -253,8 +257,8 @@ Such tracks have different (worse) covariances, and none of them is produced by 
 
 `noL1_data_study.py` splits the data tracks into the three populations of the drawing:
 
-- **D0:** no hit, dead cell (ε_data < 0.4). These are random losses, exactly what the emulation makes.
-- **W0:** no hit, working cell (ε_data > 0.95). The suspicious population.
+- **D0:** no hit, dead cell (data hit efficiency ε_data < 0.4, option `--eps-dead`). These are random losses, exactly what the emulation makes.
+- **W0:** no hit, working cell (data hit efficiency ε_data > 0.95). The suspicious population.
 - **W1:** hit, working cell. The bulk.
 
 It then compares the distributions of log10 σ of the five track parameters for W0 and D0, after reweighting both to D0 in (pt, \|η\|, pixel hits, z0·sign η).
@@ -385,15 +389,15 @@ Routes A and B were not requested, so this test is about steps 1–3 only.
 | log line | meaning | verdict |
 |---|---|---|
 | `13 runs, 91648 L1 probes ... minimum per range 122880` | `--max-events` reads the *first* 300k events = runs 401844–402046, 6.3% of 2026. 91.6k probes < 122.9k needed to split, so **1 run range**. | expected for a test. The full sample gives 7 ranges (section 3.1). |
-| `eps L1 0.6370  eps D1 0.8616` | data efficiencies of those 13 runs | consistent with the per-run plot (start of the year, ε ≈ 0.63) |
+| `eps L1 0.6370  eps D1 0.8616` | `eps` = hit efficiency ε: in those 13 runs 63.7% of the data muons crossing L1 have an L1 hit, 86.2% for D1 | consistent with the per-run plot (start of the year, ε ≈ 0.63) |
 | `kill L1 0.3298` | average P_kill over data probes | 1 − 0.637/0.945 = 0.326 ✓ |
 | `cells by fallback level 0/1/2/3 (L1): 1156/0/1276/640` | 38% of L1 cells measured, 42% surface average, 21% no probe | the statistics of 6% of the year; matches the prediction of section 3.3. Level 1 is 0 because there is only one range. |
-| `L1 ... eps_data > eps_MC: 0.021 ... UNCORRECTABLE: 0.0002` | 2% of L1 cells are slightly better in data (fluctuations of sparse cells); uncorrectable negligible | ✓ |
+| `L1 ... eps_data > eps_MC: 0.021 ... UNCORRECTABLE: 0.0002` | 2% of L1 cells have a slightly higher hit efficiency in data than in MC (fluctuations of sparse cells); uncorrectable negligible | ✓ |
 | `D1+ ... UNCORRECTABLE 0.0308`, `D1- ... 0.0337` | 3% of D1 data probes are in cells where ε_data > 1.5·ε_MC | **mostly a fallback artefact in this test**: 89% of the D1 data probes sit in level-2 cells, whose ε_data was the surface average. Compared with a real MC dead cell, that average looks "much better than MC". With the new fallback it drops to 0.0% (D1+) and 0.2% (D1−). On the full year, real uncorrectable cells exist too (3.7% / 1.6% of the probes, section 3.4). |
 | `selected MC events 107619; event weight ... mean 1.0016, min 0.083, max 1.713, 10.8% != 1` | weights come only from cells where data beats MC | **mild** (compare with ~10³ for plain reweighting): the method does what it was built for |
 | `L1 hits removed: 0.3386`, `D1 hits removed: 0.0802` | fraction of MC hits removed, on MC illumination | ✓ (differs slightly from 0.33 because MC and data illuminate the cells differently) |
 | `muons left with no pixel hit: 0.0010, with <= 2: 0.0925` | after the emulation | the test PDF has no pixel-hit panel yet (now added). No-hit muons (0.1%) are negligible; the ≤ 2 comparison with data needs the next run. |
-| `PER-CELL CLOSURE L1 data 0.6351 / before 0.9449 / emulated 0.6330` | the kill works: 0.945 → 0.633 for a target of 0.635 | **✓ closes** to −0.002 |
+| `PER-CELL CLOSURE L1 data 0.6351 / before 0.9449 / emulated 0.6330` | L1 hit efficiency: the kill brings MC from 0.945 to 0.633, for a data value of 0.635 | **✓ closes** to −0.002 |
 | `D1+ 0.9169 / 0.9656 / 0.9059`, `D1- 0.8247 / 0.8844 / 0.7973` | emulated below data by 0.011 (D1+) and 0.027 (D1−) | **understood and fixed** (9.3): the old level-2 fallback double-counts dead regions. With the new fallback, the expected closure from the same maps is +0.001 on both disks. |
 | `CONTEXT ... first BPix x first FPix: 0.3150 → 0.0634; pixel hits 0.2304 → 0.0499` | the misplaced fraction falls by 5× | good, but 6% is still misplaced. Next line says where. |
 | `fraction with first BPix layer 0/1/2/3/4` | the key line, see 9.2 | **the emulation misses data's L2/L3 inefficiency** |
@@ -439,7 +443,7 @@ Both are solved by the per-layer hit mask `{mu}_pix_valid_mask` (bits 0–3 BPix
 
 The D1 statistics of 300k events are ~14 probes per cell, so almost every D1 cell used the old level-2 value, the data surface average. That average **already contains** data's dead regions. Giving it to every sparse cell does two things:
 
-- in MC-alive cells it removes hits down to the average (ε ≈ 0.81 on D1− instead of ≈ 0.92);
+- in MC-alive cells it removes hits down to the average hit efficiency (ε ≈ 0.81 on D1− instead of ≈ 0.92);
 - in MC's dead sector nothing can be removed, because MC has no hits there.
 
 So the dead sector is counted twice and the emulated MC ends up below data. The figure shows this on the real test maps:
@@ -490,8 +494,8 @@ On the synthetic samples the same code runs at ~30k events/s, so the 511 events/
 
 **`killmaps_2026.pdf`**
 
-- **Run-range page:** the 13 runs scatter around ε(L1) = 0.637 and ε(D1) = 0.862 within their errors. One range is right for this slice.
-- **L1 ε_data and P_kill:** structure (dead modules) only in \|z\| < 10 cm; flat outside, where the cells are level 2 (as predicted in 3.3).
+- **Run-range page:** the 13 runs scatter around a hit efficiency ε(L1) = 0.637 and ε(D1) = 0.862 within their errors. One range is right for this slice.
+- **L1 `eps_data` (data hit efficiency) and P_kill:** structure (dead modules) only in \|z\| < 10 cm; flat outside, where the cells are level 2 (as predicted in 3.3).
 - **D1± ε_data:** almost flat. The cells are level 2, which is the cause of 9.3.
 - **D1± ε_MC:** a dead sector in D1− (φ ≈ 2.4–3.4 rad, the full r range) and scattered dead cells in D1+. The raw data counts show the same D1− sector dead in data (figure in 9.3).
 
@@ -511,11 +515,11 @@ On the synthetic samples the same code runs at ~30k events/s, so the 511 events/
 
 | | test (300k events) | full 2026 |
 |---|---|---|
-| run ranges | 1 | **7** (L1 ε 0.633 → 0.662 → 0.639 → 0.604 → 0.613 → 0.581 → 0.560) |
+| run ranges | 1 | **7** (L1 hit efficiency ε 0.633 → 0.662 → 0.639 → 0.604 → 0.613 → 0.581 → 0.560) |
 | L1 data probes in level-0 / level-2 cells | 86.5% / 13.5% | **95.6% / 0.4%** (4.0% level 1) |
 | D1+ data probes in level-0 / level-2 cells | 10.4% / 89.6% | **92.5% / 0.1%** |
 | D1− data probes in level-0 / level-2 cells | 11.3% / 88.7% | **87.9% / 0.0%** |
-| expected per-cell closure (emulated − data), nominal acceptance, cap 1.5 | L1 −0.003, D1 −0.005 / −0.014 (old fallback) | **L1 −0.0003, D1+ −0.0020, D1− −0.0017** |
+| expected per-cell closure of the hit efficiency ε (emulated − data), nominal acceptance, cap 1.5 | L1 −0.003, D1 −0.005 / −0.014 (old fallback) | **L1 −0.0003, D1+ −0.0020, D1− −0.0017** |
 
 The cells now carry their own measurement and the closure is at the per-mille level. The remaining −0.002 on the disks are real uncorrectable cells: MC dead, data alive.
 
@@ -543,7 +547,7 @@ The cells now carry their own measurement and the closure is at the per-mille le
 
 New finding: **data and MC do not agree on where the disks end**.
 
-- On D1+ the data efficiency drops ~1.5 mm further out than in MC: ε at r ≈ 15.8 cm is 0.13 in data against 0.06 in MC.
+- On D1+ the data hit efficiency drops ~1.5 mm further out than in MC: ε at r ≈ 15.8 cm is 0.13 in data against 0.06 in MC.
 - On D1− it drops ~3 mm further in.
 
 The sign flips between the two sides, and the size changes with φ. That points to a mm-scale difference between data and MC in where the disks sit relative to the reconstructed track: mainly a z shift, plus a smaller transverse part. These are not dead modules. The emulation handles it cell by cell:
@@ -578,7 +582,7 @@ python emulate_hit_loss.py --epoch 2026 --killmaps test_km/killmaps_2026 --max-w
 
 *Left: per-cell closure, emulated − data, first test against full run. Middle: first BPix layer, full 2026. Right: number of pixel hits on the muon track, full 2026.*
 
-**1. The hit removal closes.** Emulated − data hit efficiency on the measured cells:
+**1. The hit removal closes.** Hit efficiency ε (`eps`) on the measured cells, and emulated − data:
 
 | | data | MC before | MC emulated | emulated − data |
 |---|---|---|---|---|
@@ -688,7 +692,7 @@ All shifts are at or below ~3%, against a factor ~1.6–2 between tracks with an
 
 Two side observations from the counts on the first page:
 
-- **In 2026 data almost no L1 cell is fully efficient.** Only 53k tracks cross cells with ε ≥ 0.95, against 243k in dead cells (ε ≤ 0.4) and 1.13M in cells in between. The L1 loss is not just whole dead modules; much of it is partial inefficiency. The kill maps handle that (P_kill is continuous); the mixture test only probes the two extremes.
+- **In 2026 data almost no L1 cell is fully efficient.** Only 53k tracks cross cells with a hit efficiency ε ≥ 0.95, against 243k in dead cells (ε ≤ 0.4) and 1.13M in cells in between. The L1 loss is not just whole dead modules; much of it is partial inefficiency. The kill maps handle that (P_kill is continuous); the mixture test only probes the two extremes.
 - **Losing D1 barely changes the covariance:**
 
 ![data D1](docs/hitemu_figs/r10_nol1_D1_data.png)
@@ -769,7 +773,7 @@ This is a limitation of the "one hit error per bin" model, not of the method. Th
 | | `--min-cell-probes` | 40 | minimum mean probes per L1 cell in a range (× 3072 = minimum per range) |
 | | `--min-gain` | 25 | minimum −2 ln L gain to split |
 | | `--min-cell` | 30 | probes for a cell's own value (else fallback) |
-| | `--max-weight` | 3 | ε_data/ε_MC above which a cell is uncorrectable (1.5 until Oct 2026) |
+| | `--max-weight` | 3 | ratio of hit efficiencies ε_data/ε_MC above which a cell is uncorrectable (1.5 until Oct 2026) |
 | | `--min-weight` | 0.2 | floor of w_nohit |
 | | `--nbins-phi`, `--nbins-r` | 48, 20 | cell granularity (L1 z is fixed to the ROC pitch) |
 | | `--lumi-csv` | – | brilcalc csv for the MC shares |
@@ -777,7 +781,7 @@ This is a limitation of the "one hit error per bin" model, not of the method. Th
 | emulate_hit_loss | `--route` | none | `A`, `B` or both |
 | | `--flow-dir` | – | trained flows, with `@epoch@` / `@mu@` placeholders |
 | | `--hit-errors` | – | one or more `hiterrors_*.json` (first with a fit wins, per surface) |
-| | `--eps-dead` | 0.4 | ε_data below which a cell counts as dead (D0 target) |
+| | `--eps-dead` | 0.4 | data hit efficiency ε_data below which a cell counts as dead (D0 target) |
 | | `--write-tree` | off | write the emulated MC tree (route B) for retraining |
 | | `--closure-only` | off | only hit killing and closure; no covariance / beam-spot branches, no routes (fast) |
 | | `--fallback` | as stored | re-finalise the kill maps with another level-2 fallback (maps from before Oct 2026: `mcshape`) |
