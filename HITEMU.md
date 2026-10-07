@@ -352,6 +352,14 @@ With route B the last step (6) is to retrain covflow's MC side on the emulated M
 
 ## 9. Worked example: the 2026 test
 
+Three iterations, read in order:
+
+| | what was run | what it showed |
+|---|---|---|
+| 9.1–9.5 | 300k events (first 13 runs), first code | the L1 kill works; data also lose L2/L3 (the main finding); a D1 closure problem (a code bug, fixed in 9.3); a slow MC pass |
+| 9.6 | kill maps on the full year | 7 run ranges; fallback negligible; D1 disk-edge mismatch between data and MC; cap raised to 3 |
+| 9.7 | emulation on the full year | closure −0.002/−0.003; L2/L3/D2 loss confirmed; low-hit muons are physical; 5.5 min for the year |
+
 Two commands were run on t3ui07:
 
 ```
@@ -455,7 +463,7 @@ The earlier hypotheses for D1− (different conditions in the first runs, cells 
 
 **No new kill maps are needed to check this:** the npz holds the raw counts and the fallback is applied when the maps are loaded. Rerunning `emulate_hit_loss.py` on the existing `test_km` maps uses the new fallback automatically.
 
-### 9.4 Speed
+### 9.4 Speed (first test; solved, see 9.7)
 
 | pass | rate | full 2026 (4.78M data, 10.1M MC events) |
 |---|---|---|
@@ -555,13 +563,99 @@ python inspect_killmaps.py test_km/killmaps_2026 --max-weight 1.5 3
 python emulate_hit_loss.py --epoch 2026 --killmaps test_km/killmaps_2026 --max-weight 3 --closure-only --out test_emu_full
 ```
 
+### 9.7 Third iteration: the full-2026 emulation
+
+`emulate_hit_loss.py` was then run on the full-year maps over all of 2026: 4.78M data events and the whole MC (3.63M selected events), new code, cap 3, without routes.
+
+![full emulation](docs/hitemu_figs/f16_full_emulation.png)
+
+*Left: per-cell closure, emulated − data, first test against full run. Middle: first BPix layer, full 2026. Right: number of pixel hits on the muon track, full 2026.*
+
+**1. The hit removal closes.** Emulated − data hit efficiency on the measured cells:
+
+| | data | MC before | MC emulated | emulated − data |
+|---|---|---|---|---|
+| L1 | 0.6141 | 0.9451 | 0.6111 | **−0.0030** |
+| D1+ | 0.9082 | 0.9612 | 0.9061 | **−0.0021** |
+| D1− | 0.8124 | 0.8826 | 0.8102 | **−0.0022** |
+
+- **Disks:** the −0.002 is what the uncorrectable cells must leave (section 9.6).
+- **L1:** −0.003 is a little more than the maps alone predict (−0.0003), but still 0.5% of the efficiency. The L1 closure map shows where it comes from. The centre is noise; the residual sits in a few cells at |z| > 15 cm, which borrow their value from the neighbouring run ranges (level 1) and are scaled by the surface's time trend. It is second-order; finer or wider cells at large |z| would reduce it if needed.
+
+![L1 closure](docs/hitemu_figs/r05_full_L1_closure.png)
+
+*Real L1 closure page, full 2026: measured data, emulated MC, difference (−0.0030 on the measured cells).*
+
+**2. Weights stay mild.** Mean 1.0003; max 2.28 (cap 3); 19% of the events have a weight ≠ 1.
+
+**3. The context: the main finding is confirmed with full statistics.**
+
+| | first BPix L1 | L2 | L3 | L4 | none | first FPix D3 |
+|---|---|---|---|---|---|---|
+| data | 60.9% | 31.6% | **3.83%** | **0.32%** | 3.37% | **0.20%** |
+| MC before | 94.4% | 4.9% | 0.31% | 0.04% | 0.32% | 0.02% |
+| MC emulated | 60.6% | 37.0% | **0.31%** | **0.03%** | 2.08% | **0.02%** |
+
+- The total variation falls from 0.338 to 0.064 (first BPix layer × first FPix disk) and from 0.246 to 0.053 (pixel hits).
+- 83% of what is left comes from the L2/L3 bins.
+- L1 loss is right (60.6% against 60.9%). Starting at L3/L4 is 12× too rare; starting at D3 is 10× too rare.
+
+**4. Pixel hits: the open question of section 10 (item 3) is answered.** Data has *more* low-hit muons than the emulation:
+
+- ≤ 2 pixel hits: 10.8% in data against 9.6% emulated;
+- no pixel hit at all: 0.54% against 0.11%.
+
+So the emulated low-hit muons are not unphysical: data reconstructs (and the medium ID keeps) even more of them. The deficit is the same missing L2/L3/D2 losses seen in item 3.
+
+![full context](docs/hitemu_figs/r06_full_context.png)
+
+*Real context page, full 2026. Top: first BPix layer. Middle: first FPix disk. Bottom (new): pixel hits. The black points sit above the orange ones in the low-hit tail, at L3/L4 and at D3, in every |η| bin.*
+
+**5. A first look at the covariance of the muons that lost L1** (routes not run yet):
+
+![L1 covariance](docs/hitemu_figs/r07_full_L1_cov.png)
+
+*L1 covariance page, full 2026:*
+
+- *grey dashed: the MC muons that lost L1 in the emulation, still with their "with L1" covariance;*
+- *black solid: the target (data tracks crossing dead L1 cells);*
+- *black dotted: all data tracks without L1;*
+- *blue dotted: MC tracks that naturally lack L1.*
+
+*In σ(d_xy) and σ(d_sz) the grey curve is ~0.25 in log10 (×1.8) below the target: these muons need routes A/B. The two black curves almost coincide. That is a first hint that the data no-L1 tracks are one population, mostly dead-module losses; the mixture test (`noL1_data_study.py`) has to confirm it.*
+
+**6. Speed: solved.** The whole year took 5.5 min:
+
+- data pass: 75 s, of which 68 s reading;
+- MC pass: 253 s, of which 192 s reading;
+- about 40,000 events/s in the MC pass, against 511 in the first test.
+
+The two changes of section 9.4 were enough: the reading step capped to `--max-events`, and `bincount` instead of `np.add.at`. Reading now dominates, as it should.
+
+**Do the conclusions change?** No. Each point is confirmed with full statistics, and two open questions are closed:
+
+- the hit removal closes to −0.002 / −0.003;
+- the remaining difference is the L2/L3/D2 loss, which needs the per-layer hit mask (Bmmm patch);
+- the low-hit muons are physical;
+- the speed is fine.
+
+**Next:**
+
+1. the mixture test and the hit-error fits on full 2026:
+   ```tcsh
+   python noL1_data_study.py --epoch 2026 --killmaps test_km/killmaps_2026 --split-test --out test_nol1
+   python noL1_data_study.py --epoch 2026 --killmaps test_km/killmaps_2026 --sample mc --split-test --out test_nol1_mc
+   ```
+2. routes A/B in the emulation;
+3. the Bmmm hit-mask patch.
+
 ---
 
 ## 10. Approximations, open items, speed
 
 1. **No per-layer hit mask** (section 9.2). After a kill, the next crossed layer is assumed valid, and L2–L4 / D2–D3 cannot be emulated. This is the dominant residual in 2026. Fix: `{mu}_pix_valid_mask` in Bmmm.
 2. **Two hits on one layer** (module overlaps) count as one when killed: for those tracks n_pix stays 1 too high.
-3. **Tracks left with ≤ 2 pixel hits are kept**; the reconstruction would have lost some of them (0.1% have none).
+3. **Tracks left with ≤ 2 pixel hits are kept.** Checked on full 2026 (section 9.7): data has even more of them (10.8% against 9.6%; no pixel hit 0.54% against 0.11%), so keeping them is right.
 4. **MC share per run range** = share of selected data events, which includes trigger and selection efficiency. `--lumi-csv` takes the brilcalc recorded luminosity instead.
 5. **Uncorrectable cells** (MC dead where data works) cannot be emulated by removing hits. In 2026 they are mostly the D1+ outer edge, where data's disk extends ~1.5 mm further than MC's (section 9.6). With cap 1.5 they leave 0.9% of the D1+ efficiency missing; with the new default cap 3, 0.4%, at the price of weights up to 3 on those few tracks. Inside the nominal acceptance it is below 0.2% on every surface.
 6. **Fallback cells** (level 2) take MC's pattern scaled to the data total: data-only dead modules in a sparse cell are spread over the surface. They hold few probes by definition, and with the full sample most of them become level 1 (same cell, neighbouring months).
@@ -569,7 +663,7 @@ python emulate_hit_loss.py --epoch 2026 --killmaps test_km/killmaps_2026 --max-w
 8. **Route A** uses the flows as trained on non-emulated MC: f_MC is evaluated at the original context, where MC is plentiful.
 9. **Offline only.** The smearing δ ~ N(0, C′ − C) is applied here only to the beam-spot IP-significance check. Production needs the kill step, the chosen route and the smearing in Bmmm before the vertex fits; the functions in `hitemu.py` are plain numpy.
 10. **Early epochs** (2022–2023) have few dead cells, so the hit-error fits may be empty. `EXTRA_HITERR` in `run_hitemu.csh` can point to a later epoch's fits.
-11. **Speed** (section 9.4): the 511 events/s MC pass on the real ntuples is not understood yet. The `TIMING` line of the next run will show whether reading dominates. `--closure-only` avoids the covariance branches when only the hit pattern matters.
+11. **Speed:** solved (section 9.7). The full year takes 5.5 min without routes, dominated by reading. `--closure-only` is still there for even faster iterations.
 
 ---
 
