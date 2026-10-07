@@ -236,6 +236,13 @@ For every selected MC event, `emulate_hit_loss.py` does the following.
 
 **The weak point is step 4: "the next layer crossed is assumed to have a valid hit".** The ntuple has only the *first* layer and the hit counts, not a per-layer mask. So after removing L1 we do not know whether the MC track also lacked an L2 hit. And even if we knew, we would have no L2 map telling us how often data lacks L2. Section 9 shows that this is the main thing the 2026 test exposed.
 
+**With the per-layer hit masks (Bmmm patch, section 9.9) this step becomes exact.** The kill maps then cover all ten surfaces (L1–L4, D1±–D3±), every layer is killed with its own map, and the context after killing is recomputed from the hits that are really left:
+
+- the first BPix layer is the lowest layer still in the mask;
+- n_pix drops by the hits on the killed layers, overlaps included.
+
+The scripts switch automatically: the ten surfaces with the masks in the ntuple, L1/D1 without.
+
 ![L2 problem](docs/hitemu_figs/f09_L2_problem.png)
 
 *Left: a data muon without L1 and L2. Middle: today the emulation removes L1 and must guess L2 ("valid if crossed"), so emulated muons almost never start at L3. Right: with a per-layer hit mask `{mu}_pix_valid_mask` in the ntuple (the "Bmmm patch"), L2 is known, and an L2 kill map can be built exactly like the L1 one.*
@@ -419,7 +426,7 @@ With route B the last step (6) is to retrain covflow's MC side on the emulated M
 
 ## 9. Worked example: the 2026 test
 
-Three iterations, read in order:
+The iterations, in order:
 
 | | what was run | what it showed |
 |---|---|---|
@@ -427,6 +434,7 @@ Three iterations, read in order:
 | 9.6 | kill maps on the full year | 7 run ranges; fallback negligible; D1 disk-edge mismatch between data and MC; cap raised to 3 |
 | 9.7 | emulation on the full year | closure −0.002/−0.003; L2/L3/D2 loss confirmed; low-hit muons are physical; 5.5 min for the year |
 | 9.8 | no-L1 study on the full year | mixture test clean, so route A is primary; route B's single hit error fails beyond \|η\| ≈ 0.5 (fix: V = k · H C Hᵀ); D1 kills need no covariance change |
+| 9.9 | per-layer masks, synthetic test | the mask-based emulation reproduces L2/L3/D2 losses (first layer = L3: 0.0051 vs data 0.0051, against 0.0001 before); weight floor removed |
 
 Two commands were run on t3ui07:
 
@@ -790,6 +798,57 @@ This is a limitation of the "one hit error per bin" model, not of the method. Th
 2. implement the relative hit error (V = k · H C Hᵀ) in route B and refit (on request);
 3. the Bmmm hit-mask patch (on request).
 
+### 9.9 Preparing for the per-layer masks (tested on synthetic samples)
+
+The Bmmm patch (branch `pix-layer-masks`) adds four muon branches:
+
+| branch | meaning |
+|---|---|
+| `{mu}_pix_valid_mask` | layers with at least one valid hit |
+| `{mu}_pix_miss_mask` | layers crossed on a **working** module without a hit |
+| `{mu}_pix_inact_mask` | layers crossed on an **inactive or bad** module |
+| `{mu}_pix_hit_count` | valid hits per layer, 2 bits each |
+
+Bits 0–3 are BPix L1–L4, bits 4–6 FPix D1–D3. The covflow scripts now use them whenever they are in the ntuples (data and MC):
+
+- **`build_kill_maps.py`** maps all ten surfaces. For each surface:
+  - a probe is a muon whose helix crosses it, with ≥ 2 pixel hits on other layers (counted with the per-layer counts, so overlaps on that layer are excluded);
+  - the hit comes from the valid mask.
+
+  The log ends with a table of data and MC hit efficiency ε and kill probability per surface and run range. The run ranges are still defined by L1 and D1.
+- **`emulate_hit_loss.py`** kills each layer with its own map and recomputes the whole context exactly: masks, counts, n_pix, first BPix layer, first FPix disk, n_pix_layer, pix_first_layer. Route A changes the covariance of every muon that lost any hit. Route B still removes only L1/D1 hits (it is a check only). The written tree carries the emulated masks and counts, plus `{mu}_emu_kill_mask` (layers whose hits were removed). Removed hits are added to `pix_miss_mask`.
+- **`pixel_eff_maps.py --surfaces all`** uses the counts for the probe definition too.
+- **Without the masks** (current ntuples) everything runs as before.
+
+**The synthetic test.** I built a sample with the 2026 failure mode:
+
+- data lose L1 and L2 in the same region, L2 elsewhere, L3 in a region the conditions do not know about, and part of D2+;
+- MC has its own dead modules on L1 and L2;
+- 8% of the hits come in pairs (module overlaps).
+
+On it, the old L1/D1-only emulation reproduces exactly the problem seen in real 2026 data, and the per-layer emulation removes it:
+
+![masks old vs new](docs/hitemu_figs/s08_masks_old_vs_new.png)
+
+*Synthetic sample. Left: first BPix layer. Muons starting at L3 are 0.51% in data, 0.01% with the old emulation, 0.51% with the new one. Middle: number of pixel hits; the total variation from data drops from 0.034 to 0.006. Right: per-cell closure on all ten surfaces with the new emulation. L1 and L2 (red) keep −0.5% and −0.4%: these are MC-only dead modules built into the sample, where data has hits that MC cannot provide (uncorrectable by construction). Every other surface is within 0.2%.*
+
+| | old (L1/D1, next layer assumed valid) | new (per-layer masks) | data |
+|---|---|---|---|
+| first BPix layer = L3 | 0.0001 | 0.0051 | 0.0051 |
+| first FPix disk = D3 | 0.0000 | 0.0005 | 0.0006 |
+| TV, first layer × first disk | 0.0115 | 0.0063 | – |
+| TV, pixel hits | 0.0343 | 0.0062 | – |
+
+The emulated tree was checked entry by entry, for every muon:
+
+- first BPix layer, first FPix disk, n_pix_b, n_pix_e, n_pix, n_pix_layer and pix_first_layer agree with the written masks and counts;
+- the removed layers are a subset of the original hits;
+- emulated mask = original mask minus removed layers.
+
+**One more change: no floor on w_nohit.** In cells where data has the higher hit efficiency, MC muons without the hit get the weight w_nohit = (1 − ε_data)/(1 − ε_MC). Until now it had a floor of 0.2. With ten surfaces many cells have data ≈ MC ≈ 0.99, where a small statistical excess of ε_data hits the floor. The floor then overweights the MC muons without the hit, and the emulated efficiency comes out ~0.15% low on every such surface. Without the floor the expected closure on L4, D3± goes from −0.0015 to ~0 (synthetic sample). The cost is a few events with weight 0: the effective sample size is still 97% of the events with ten surfaces. The new default is `--min-weight 0`, and `emulate_hit_loss.py --min-weight` re-finalises existing maps.
+
+**Known small residual.** Cells where the MC itself has fewer than 30 probes take the MC surface average as ε_MC. Where the real MC cell differs (disk edges), this leaves ≤ 0.1% in the synthetic test, whose MC is only 150k events. In the full Summer24 MC these cells hold < 0.2% of the probes.
+
 ---
 
 ## 10. Approximations, open items, speed
@@ -837,7 +896,8 @@ This is a limitation of the "one hit error per bin" model, not of the method. Th
 | | `--min-gain` | 25 | minimum −2 ln L gain to split |
 | | `--min-cell` | 30 | probes for a cell's own value (else fallback) |
 | | `--max-weight` | 3 | ratio of hit efficiencies ε_data/ε_MC above which a cell is uncorrectable (1.5 until Oct 2026) |
-| | `--min-weight` | 0.2 | floor of w_nohit |
+| | `--min-weight` | 0 | floor of w_nohit (was 0.2 until Oct 2026: a floor biases the emulated hit efficiency low by ~0.1–0.2% where data and MC are both ~0.99; section 9.9) |
+| | `--surfaces` | auto | `auto` = all ten surfaces with the per-layer masks, L1 D1+ D1− without; `all`, or a list |
 | | `--nbins-phi`, `--nbins-r` | 48, 20 | cell granularity (L1 z is fixed to the ROC pitch) |
 | | `--lumi-csv` | – | brilcalc csv for the MC shares |
 | | `--fallback` | mcshape | level-2 data efficiency: `mcshape` (ε_MC of the cell × factor) or `average` (old) |
@@ -849,6 +909,7 @@ This is a limitation of the "one hit error per bin" model, not of the method. Th
 | | `--closure-only` | off | only hit killing and closure; no covariance / beam-spot branches, no routes (fast) |
 | | `--fallback` | as stored | re-finalise the kill maps with another level-2 fallback (maps from before Oct 2026: `mcshape`) |
 | | `--max-weight` | as stored | re-finalise the kill maps with another cap (no need to rebuild them) |
+| | `--min-weight` | as stored | re-finalise the kill maps with another floor on w_nohit (0 = none) |
 | all | `--max-events` | all | read only the first N events (= first runs) |
 
 ### Outputs per epoch (`run_hitemu.csh`)

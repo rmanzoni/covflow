@@ -35,7 +35,10 @@ import pixel_eff_maps as P
 from pixel_eff_maps import GEOM, die, warn, Progress
 import features as F          # covflow/features.py: numpy only
 
-KILL_SURFACES = ('L1', 'D1+', 'D1-')
+KILL_SURFACES = ('L1', 'D1+', 'D1-')             # without the per-layer hit mask
+ALL_SURFACES = ('L1', 'L2', 'L3', 'L4', 'D1+', 'D1-', 'D2+', 'D2-', 'D3+', 'D3-')
+MASK_BIT = dict(P.MASK_BIT)                     # 'L1'..'L4' -> 0..3, 'D1'..'D3' -> 4..6
+COUNT_BITS = 2                                  # bits per layer in {mu}_pix_hit_count
 PACK_NAMES = list(F.PACK_NAMES)
 
 # The branch set Ric's 2026 runs used: transverse reference point = PV,
@@ -49,8 +52,15 @@ EXTRA_TEMPLATES = dict(
     n_pix_e='{mu}_n_pix_e_hit',
     bs_dxy='{mu}_bs_dxy',          # optional: only for the IP-significance check
     bs_dxy_e='{mu}_bs_dxy_e',      # optional
+    # per-layer hit masks (Bmmm TrackHitContent, Oct 2026): bit 0-3 BPix L1-L4,
+    # bit 4-6 FPix D1-D3. Optional: without them only L1 / D1 can be emulated.
+    mask='{mu}_pix_valid_mask',
+    count='{mu}_pix_hit_count',    # valid hits per layer, 2 bits each
+    miss_mask='{mu}_pix_miss_mask',
+    inact_mask='{mu}_pix_inact_mask',
 )
-OPTIONAL_EXTRA = {'bs_dxy', 'bs_dxy_e'}
+OPTIONAL_EXTRA = {'bs_dxy', 'bs_dxy_e', 'mask', 'count', 'miss_mask', 'inact_mask'}
+MASK_KEYS = ('mask', 'count', 'miss_mask', 'inact_mask')
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +108,9 @@ def resolve_branches(a, need_cov=False, need_bs=False):
         for k in ('bs_dxy', 'bs_dxy_e'):
             if extra[k]:
                 tmpl[k] = extra[k]
+    for k in MASK_KEYS:              # dropped later by drop_missing_optional if absent
+        if extra[k]:
+            tmpl[k] = extra[k]
     if need_cov:
         for n in PACK_NAMES:
             tmpl['cov_' + n] = '{mu}_cov_' + n
@@ -117,17 +130,41 @@ def selection_expr(info, is_mc):
     return ' & '.join('(%s)' % s for s in parts if s)
 
 
-def drop_missing_optional(tmpl, files, tree, muons):
-    """Remove optional templates whose branches are absent in the first file."""
+def drop_missing_optional(tmpl, files, tree, muons, quiet_masks=False):
+    """Remove optional templates whose branches are absent in the first file of
+    any of the given samples (`files`: a list of files, or a list of such
+    lists). The per-layer masks are kept only if mask AND count are present
+    everywhere: the emulation of L2-L4 / D2-D3 needs both."""
     import uproot
-    with uproot.open(files[0]) as fh:
-        have = set(fh[tree].keys())
+    groups = files if files and isinstance(files[0], (list, tuple)) else [files]
+    have = None
+    for g in groups:
+        with uproot.open(g[0]) as fh:
+            keys = set(fh[tree].keys())
+        have = keys if have is None else have & keys
     for k in list(tmpl):
         if k in OPTIONAL_EXTRA and tmpl[k].format(mu=muons[0]) not in have:
-            warn('optional branch %s not found: the checks that need it are skipped'
-                 % tmpl[k].format(mu=muons[0]))
+            if k not in MASK_KEYS or not quiet_masks:
+                warn('optional branch %s not found: %s'
+                     % (tmpl[k].format(mu=muons[0]),
+                        'only L1 / D1 can be emulated' if k in ('mask', 'count')
+                        else 'the checks that need it are skipped'))
             del tmpl[k]
+    if ('mask' in tmpl) != ('count' in tmpl):
+        warn('per-layer hit masks need both {mu}_pix_valid_mask and {mu}_pix_hit_count: '
+             'falling back to L1 / D1 only')
+        tmpl.pop('mask', None)
+        tmpl.pop('count', None)
     return tmpl
+
+
+def has_masks(tmpl):
+    return 'mask' in tmpl and 'count' in tmpl
+
+
+def default_surfaces(tmpl):
+    """All ten pixel surfaces with the per-layer masks, L1 / D1 without."""
+    return ALL_SURFACES if has_masks(tmpl) else KILL_SURFACES
 
 
 def hist_add(h, idx, w):
@@ -188,6 +225,10 @@ def muon_view(chunk, mu, tmpl, a, sel):
     for k in ('bs_dxy', 'bs_dxy_e'):
         if k in tmpl:
             v[k] = g(k)
+    for k in MASK_KEYS:
+        if k in tmpl:
+            m = g(k)
+            v[k] = np.where(np.isfinite(m), m, 0).astype(np.int64)
     if 'cov_' + PACK_NAMES[0] in tmpl:
         v['cov'] = np.stack([g('cov_' + n) for n in PACK_NAMES], axis=1)
     return v
@@ -230,12 +271,46 @@ def cross_view(name, v, sel=None):
 
 
 def has_hit(name, v):
-    """Valid hit on L1 / D1 from the first-hit branches (no hit mask needed)."""
+    """Valid hit on a surface: from the per-layer mask when the ntuple has it,
+    else (L1 / D1 only) from the first-hit branches. The two agree on L1 / D1
+    by construction (TrackHitContent derives both from the same hits)."""
+    if 'mask' in v:
+        return ((v['mask'] >> MASK_BIT[name[:2]]) & 1).astype(bool)
     if name == 'L1':
         return v['first_b'] == 1
     if name.startswith('D1'):
         return v['first_e'] == 1
-    raise ValueError('has_hit(%s) needs a per-layer hit mask' % name)
+    raise ValueError('has_hit(%s) needs the per-layer hit mask ({mu}_pix_valid_mask)' % name)
+
+
+def layer_count(name, v):
+    """Valid hits on the layer / disk of `name` (2 on module overlaps). Without
+    the per-layer counts: 1 if the surface has a hit, else 0."""
+    if 'count' in v:
+        return (v['count'] >> (COUNT_BITS * MASK_BIT[name[:2]])) & ((1 << COUNT_BITS) - 1)
+    return has_hit(name, v).astype(np.int64)
+
+
+def other_pixel_hits(name, v):
+    """Valid pixel hits of the track besides those on `name` (probe definition)."""
+    return v['n_pix'] - layer_count(name, v)
+
+
+def first_from_mask(mask):
+    """(first BPix layer 1-4 or 0, first FPix disk 1-3 or 0, n pixel layers,
+    pix_first_layer code) from a per-layer valid mask."""
+    mask = np.asarray(mask, np.int64)
+    fb = np.zeros(mask.shape, np.int64)
+    fe = np.zeros(mask.shape, np.int64)
+    for k in (4, 3, 2, 1):
+        fb = np.where((mask >> MASK_BIT['L%d' % k]) & 1, k, fb)
+    for k in (3, 2, 1):
+        fe = np.where((mask >> MASK_BIT['D%d' % k]) & 1, k, fe)
+    nlay = np.zeros(mask.shape, np.int64)
+    for b in range(7):
+        nlay += (mask >> b) & 1
+    code = np.where(fb > 0, fb, np.where(fe > 0, 4 + fe, 0))
+    return fb, fe, nlay, code
 
 
 def cell_index(xe, ye, x, y):
@@ -383,7 +458,7 @@ class KillMaps:
         self.finalised = False
 
     # ---------------------------------------------------------------- build
-    def finalise(self, min_cell, max_weight=1.5, prior=None, min_weight=0.2,
+    def finalise(self, min_cell, max_weight=1.5, prior=None, min_weight=0.0,
                  fallback='mcshape'):
         """
         fallback: what a data cell with too few probes in the whole epoch
@@ -537,7 +612,7 @@ class KillMaps:
                       if hasattr(o, 'item') else str(o))
 
     @classmethod
-    def load(cls, path, min_cell=None, max_weight=None, fallback=None):
+    def load(cls, path, min_cell=None, max_weight=None, fallback=None, min_weight=None):
         stem = path[:-4] if path.endswith('.npz') else path
         if not os.path.isfile(stem + '.npz') or not os.path.isfile(stem + '.json'):
             die('kill maps %s.npz/.json not found (run build_kill_maps.py first)' % stem)
@@ -553,7 +628,10 @@ class KillMaps:
                  meta)
         return km.finalise(min_cell if min_cell is not None else meta.get('min_cell') or 30,
                            max_weight if max_weight is not None else meta.get('max_weight') or 1.5,
-                           meta.get('prior'), meta.get('min_weight') or 0.2,
+                           meta.get('prior'),
+                           # explicit None test: a stored 0.0 is a valid choice
+                           min_weight if min_weight is not None else
+                           (meta['min_weight'] if meta.get('min_weight') is not None else 0.2),
                            fallback or meta.get('fallback') or 'mcshape')
 
 
@@ -563,22 +641,33 @@ class KillMaps:
 
 def emulate(v, range_idx, km, rng):
     """
-    Kill L1 / D1 hits of MC tracks according to the kill maps of each track's
-    run range. Returns a dict of per-track arrays:
+    Kill MC hits according to the kill maps of each track's run range, on every
+    surface the maps have. Returns a dict of per-track arrays:
 
-      kill_L1, kill_D1   bool, hit removed
-      w                  weight from the cells where data beats MC (<= 1/eps_MC)
-      cell_ok_L1/_D1     the track crosses a mapped cell
-      n_pix, n_pix_b, n_pix_e, first_b, first_e   the context after killing
+      kill[s], cell_ok[s]   per surface: hit removed / track crosses a mapped cell
+      kill_L1, kill_D1      the same, L1 and D1 (either side) -- routes use them
+      kill_other            a hit removed on L2-L4 / D2-D3
+      kill_any              any hit removed
+      cell_ok_L1/_D1
+      w                     weight from the cells where data beats MC
+      n_pix, n_pix_b, n_pix_e, first_b, first_e, n_pix_layer, first_layer
+                            the context after killing
+      mask                  the per-layer valid mask after killing (masks only)
 
-    Only hits that exist are removed; a removed L1 hit makes the first BPix
-    layer the next one the track crosses in acceptance (L2, L3, L4), or 0 if no
-    BPix hit is left; same for the disks. Without a per-layer hit mask this is
-    an assumption: a track that had L1 and L3 but no L2 would get 2, not 3.
+    With the per-layer masks ({mu}_pix_valid_mask, {mu}_pix_hit_count) the
+    context after killing is exact: the hits removed are the ones on the
+    killed layers (overlaps included), and the first layer is the next one
+    that really has a hit. Without them (L1 / D1 maps only) the next layer the
+    helix crosses in acceptance is ASSUMED to have a valid hit: a track that
+    had L1 and L3 but no L2 gets 2, not 3 -- the limitation seen in 2026.
     """
     N = len(v['pt'])
-    out = dict(kill_L1=np.zeros(N, bool), kill_D1=np.zeros(N, bool),
-               w=np.ones(N), cell_ok_L1=np.zeros(N, bool), cell_ok_D1=np.zeros(N, bool))
+    use_mask = 'mask' in v and 'count' in v
+    extra = [s for s in km.surfaces if s not in KILL_SURFACES]
+    if extra and not use_mask:
+        die('the kill maps have %s but the ntuple has no per-layer hit mask '
+            '({mu}_pix_valid_mask / {mu}_pix_hit_count)' % ', '.join(extra))
+    out = dict(kill={}, cell_ok={}, w=np.ones(N))
     for s in km.surfaces:
         x, y = cross_view(s, v)
         ix, iy, ok = km.lookup(s, x, y)
@@ -589,9 +678,56 @@ def emulate(v, range_idx, km, rng):
         hit = has_hit(s, v) & ok
         kill = hit & (rng.random(N) < pk)
         out['w'] *= np.where(ok, np.where(hit, wh, wn), 1.0)
-        key = 'L1' if s == 'L1' else 'D1'
-        out['kill_' + key] |= kill
-        out['cell_ok_' + key] |= ok
+        out['kill'][s] = kill
+        out['cell_ok'][s] = ok
+    zero = np.zeros(N, bool)
+    k = out['kill']
+    c = out['cell_ok']
+    out['kill_L1'] = k.get('L1', zero)
+    out['kill_D1'] = k.get('D1+', zero) | k.get('D1-', zero)
+    out['cell_ok_L1'] = c.get('L1', zero)
+    out['cell_ok_D1'] = c.get('D1+', zero) | c.get('D1-', zero)
+    out['kill_other'] = zero.copy()
+    for s in extra:
+        out['kill_other'] |= k[s]
+    out['kill_any'] = out['kill_L1'] | out['kill_D1'] | out['kill_other']
+
+    if use_mask:
+        mask = v['mask'].copy()
+        count = v['count'].copy()
+        killed_bits = np.zeros(N, np.int64)
+        lost_b = np.zeros(N, np.int64)
+        lost_e = np.zeros(N, np.int64)
+        for s, ks in k.items():
+            bit = MASK_BIT[s[:2]]
+            n_on = layer_count(s, v)
+            mask = np.where(ks, mask & ~(1 << bit), mask)
+            count = np.where(ks, count & ~(((1 << COUNT_BITS) - 1) << (COUNT_BITS * bit)), count)
+            killed_bits |= np.where(ks, 1 << bit, 0)
+            if s[0] == 'L':
+                lost_b += np.where(ks, n_on, 0)
+            else:
+                lost_e += np.where(ks, n_on, 0)
+        fb, fe, nlay, code = first_from_mask(mask)
+        out['mask'] = mask
+        out['count'] = count
+        out['kill_mask'] = killed_bits
+        # a removed hit looks, in the emulated MC, like a layer crossed without a
+        # hit: it joins the MISSING mask (whether data would call it missing or
+        # inactive is not known)
+        if 'miss_mask' in v:
+            out['miss_mask'] = v['miss_mask'] | killed_bits
+        if 'inact_mask' in v:
+            out['inact_mask'] = v['inact_mask'].copy()
+        out['n_pix_b'] = v['n_pix_b'] - lost_b
+        out['n_pix_e'] = v['n_pix_e'] - lost_e
+        out['n_pix'] = v['n_pix'] - lost_b - lost_e
+        out['first_b'] = fb.astype(np.float64)
+        out['first_e'] = fe.astype(np.float64)
+        out['n_pix_layer'] = nlay.astype(np.float64)
+        out['first_layer'] = code.astype(np.float64)
+        return out
+
     kL1, kD1 = out['kill_L1'], out['kill_D1']
     out['n_pix'] = v['n_pix'] - kL1 - kD1
     out['n_pix_b'] = v['n_pix_b'] - kL1
@@ -909,9 +1045,10 @@ def route_b(cov_packed, v, killed_L1, killed_D1, hit_errors):
 
 HIT_CONTEXT_SUFFIX = {'_n_pix_hit': 'n_pix', '_n_pix_b_hit': 'n_pix_b',
                       '_n_pix_e_hit': 'n_pix_e', '_pix_first_b_layer': 'first_b',
-                      '_pix_first_e_disk': 'first_e'}
-UNEMULATED_HIT_SUFFIX = ('_n_pix_layer', '_n_trk_layer', '_pix_first_layer',
-                         '_n_pix_miss_inner', '_n_pix_inact_inner')
+                      '_pix_first_e_disk': 'first_e',
+                      # emulated only with the per-layer masks
+                      '_n_pix_layer': 'n_pix_layer', '_pix_first_layer': 'first_layer'}
+UNEMULATED_HIT_SUFFIX = ('_n_trk_layer', '_n_pix_miss_inner', '_n_pix_inact_inner')
 
 
 def _import_covflow():
@@ -975,6 +1112,9 @@ class CovFlow:
         for b in self.branches:
             key = next((k for suf, k in HIT_CONTEXT_SUFFIX.items() if b.endswith(suf)), None)
             if emu is not None and key is not None:
+                if key not in emu:
+                    die('context branch %s can only be emulated with the per-layer hit '
+                        'masks ({mu}_pix_valid_mask, {mu}_pix_hit_count)' % b)
                 col = np.asarray(emu[key], np.float64)
             else:
                 col = np.asarray(chunk[b], np.float64)[sel]

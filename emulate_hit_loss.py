@@ -102,6 +102,9 @@ def parse_args():
                    help='re-finalise the kill maps with this level-2 fallback '
                         '(default: the one stored in the maps; maps written before '
                         'Oct 2026 get mcshape)')
+    p.add_argument('--min-weight', type=float, default=None,
+                   help='re-finalise the kill maps with this floor on w_nohit '
+                        '(default: the one stored in the maps; 0 = no floor)')
     p.add_argument('--max-weight', type=float, default=None,
                    help='re-finalise the kill maps with this cap on eps_data/eps_MC '
                         '(default: the one stored in the maps)')
@@ -203,8 +206,10 @@ def main():
     t0 = time.time()
     rng = np.random.default_rng(a.seed)
     info = P.load_epoch(a)
-    km = H.KillMaps.load(a.killmaps, fallback=a.fallback, max_weight=a.max_weight)
-    print('kill maps %s, level-2 fallback: %s, max weight %.2f' % (a.killmaps, km.fallback, km.max_weight))
+    km = H.KillMaps.load(a.killmaps, fallback=a.fallback, max_weight=a.max_weight,
+                         min_weight=a.min_weight)
+    print('kill maps %s, level-2 fallback: %s, max weight %.2f, min weight %.2f'
+          % (a.killmaps, km.fallback, km.max_weight, km.min_weight))
     timing = {}
     if km.meta.get('epoch') != a.epoch:
         die('kill maps are for epoch %s, not %s' % (km.meta.get('epoch'), a.epoch))
@@ -219,14 +224,31 @@ def main():
             flows[mu] = H.CovFlow(d, mu, device=a.device)
     tmpl, run_branch = H.resolve_branches(a, need_cov=not a.closure_only,
                                           need_bs=not a.closure_only)
-    tmpl = H.drop_missing_optional(tmpl, info['data'], info['tree'], a.muons)
+    tmpl = H.drop_missing_optional(tmpl, [info['data'], info['mc']], info['tree'], a.muons)
     has_bs = 'bs_dxy' in tmpl and 'bs_dxy_e' in tmpl
+    extra_surf = [s for s in km.surfaces if s not in H.KILL_SURFACES]
+    if extra_surf and not H.has_masks(tmpl):
+        die('the kill maps have %s, but these ntuples have no per-layer hit masks'
+            % ' '.join(extra_surf))
+    print('hit pattern: %s' % ('per-layer masks (exact context after killing, surfaces %s)'
+                               % ' '.join(km.surfaces) if H.has_masks(tmpl) else
+                               'no per-layer mask: L1 / D1 only, next crossed layer assumed valid'))
 
     sel_d, sel_m = H.selection_expr(info, False), H.selection_expr(info, True)
     flow_br = sorted({b for f in flows.values() for b in f.needed_branches()})
     need_d = H.sample_branches(tmpl, a.muons, sel_d, [run_branch])
+    tree_br = []
+    if a.write_tree and H.has_masks(tmpl):
+        # with the masks the emulated tree can also carry the exact n_pix_layer /
+        # pix_first_layer, if the ntuple has them (TreeWriter replaces them)
+        import uproot
+        with uproot.open(info['mc'][0]) as fh:
+            have = set(fh[info['tree']].keys())
+        tree_br = [b % mu for mu in a.muons for b in ('%s_n_pix_layer', '%s_pix_first_layer')
+                   if b % mu in have]
     need_m = H.sample_branches(tmpl, a.muons, sel_m,
-                               ([info['mc_weight']] if info['mc_weight'] else []) + flow_br)
+                               ([info['mc_weight']] if info['mc_weight'] else []) + flow_br
+                               + tree_br)
     entries = P.preflight({'data': info['data'], 'mc': info['mc']}, info['tree'],
                           {'data': need_d, 'mc': need_m})
     out = a.out or 'emu_%s' % a.epoch
@@ -249,7 +271,7 @@ def main():
     AB_EDGES = np.linspace(-3.6, -0.8, 61)
     D_EDGES = np.linspace(-0.4, 0.4, 81)
     tot = dict(mu=0.0, hitL1=0.0, killL1=0.0, hitD1=0.0, killD1=0.0, nopix=0.0,
-               lowpix=0.0, w_ne1=0.0, ev=0.0, w_sum=0.0, w_max=1.0, w_min=1.0)
+               lowpix=0.0, w_ne1=0.0, ev=0.0, w_sum=0.0, w_sum2=0.0, w_max=1.0, w_min=1.0)
 
     # --------------------------------------------------------------- data
     print('\n[1/2] data: context, no-hit targets')
@@ -320,6 +342,7 @@ def main():
         w_tot = wpu * w_ev
         tot['ev'] += ns
         tot['w_sum'] += float(w_ev.sum())
+        tot['w_sum2'] += float((w_ev ** 2).sum())
         tot['w_ne1'] += float((np.abs(w_ev - 1) > 1e-9).sum())
         tot['w_max'] = max(tot['w_max'], float(w_ev.max()) if ns else 1.0)
         tot['w_min'] = min(tot['w_min'], float(w_ev.min()) if ns else 1.0)
@@ -330,6 +353,12 @@ def main():
             ctx['mc'].fill(v['eta'], v['first_b'], v['first_e'], v['n_pix'], wg)
             ctx['emu'].fill(v['eta'], e['first_b'], e['first_e'], e['n_pix'], wge)
             hL1, hD1 = H.has_hit('L1', v), H.has_hit('D1+', v)
+            for s in surfaces:
+                hs = H.has_hit(s, v) & e['cell_ok'][s]
+                tot['hit_' + s] = tot.get('hit_' + s, 0.0) + float(wg[hs].sum())
+                tot['kill_' + s] = tot.get('kill_' + s, 0.0) + float(wg[e['kill'][s]].sum())
+            tot['kill_any'] = tot.get('kill_any', 0.0) + float(wg[e['kill_any']].sum())
+            tot['kill_other'] = tot.get('kill_other', 0.0) + float(wg[e['kill_other']].sum())
             tot['mu'] += wg.sum()
             tot['hitL1'] += wg[hL1 & e['cell_ok_L1']].sum()
             tot['killL1'] += wg[e['kill_L1']].sum()
@@ -342,8 +371,8 @@ def main():
                 x, y = H.cross_view(s, v)
                 ix, iy, ok = km.lookup(s, x, y)
                 hit0 = H.has_hit(s, v)
-                kill = e['kill_L1'] if s == 'L1' else e['kill_D1']
-                ok &= good & ((v['n_pix'] - hit0) >= a.min_other_hits)
+                kill = e['kill'][s]
+                ok &= good & (H.other_pixel_hits(s, v) >= a.min_other_hits)
                 hit1 = (hit0 & ~kill).astype(float)
                 H.hist_add(maps['emu'][s][0], (ix[ok], iy[ok]), wge[ok] * hit1[ok])
                 H.hist_add(maps['emu'][s][1], (ix[ok], iy[ok]), wge[ok])
@@ -392,7 +421,9 @@ def main():
 def run_routes(a, v, good, e, chunk, sel, flow, he, rng, mu):
     """Route outputs for the muons that lost a hit: packed C' and the smearing."""
     out = {}
-    killed = good & (e['kill_L1'] | e['kill_D1']) & np.all(np.isfinite(v['cov']), 1)
+    # every muon that lost a hit gets a new covariance from route A (the flows
+    # see the full emulated context); route B removes the L1 / D1 hits only
+    killed = good & e['kill_any'] & np.all(np.isfinite(v['cov']), 1)
     idx = np.nonzero(killed)[0]
     out['idx'] = idx
     if len(idx) == 0 or not a.route:
@@ -482,7 +513,11 @@ class TreeWriter:
     unchanged. Everything replaced is listed in the companion json."""
 
     CTX = {'n_pix_hit': 'n_pix', 'n_pix_b_hit': 'n_pix_b', 'n_pix_e_hit': 'n_pix_e',
-           'pix_first_b_layer': 'first_b', 'pix_first_e_disk': 'first_e'}
+           'pix_first_b_layer': 'first_b', 'pix_first_e_disk': 'first_e',
+           # replaced only when the ntuple has the per-layer masks
+           'n_pix_layer': 'n_pix_layer', 'pix_first_layer': 'first_layer',
+           'pix_valid_mask': 'mask', 'pix_hit_count': 'count',
+           'pix_miss_mask': 'miss_mask', 'pix_inact_mask': 'inact_mask'}
 
     def __init__(self, path, info, a):
         import uproot
@@ -503,11 +538,15 @@ class TreeWriter:
             v, e, ro = cols[mu]
             for b, k in self.CTX.items():
                 name = '%s_%s' % (mu, b)
-                if name in out:
+                if name in out and k in e:
                     out['%s_orig_%s' % (mu, b)] = out[name].copy()
                     out[name] = e[k]
             out['%s_emu_kill_L1' % mu] = e['kill_L1'].astype(np.float32)
             out['%s_emu_kill_D1' % mu] = e['kill_D1'].astype(np.float32)
+            kmask = np.zeros(len(e['w']), np.int64)
+            for s_, ks in e['kill'].items():
+                kmask |= np.where(ks, 1 << H.MASK_BIT[s_[:2]], 0)
+            out['%s_emu_kill_mask' % mu] = kmask.astype(np.float32)
             idx = ro.get('idx', np.zeros(0, int))
             okB = np.ones(len(e['w']), np.float32)
             dl = np.zeros((len(e['w']), 5), np.float32)
@@ -545,6 +584,8 @@ class TreeWriter:
                 weight='%s -> %s * emu_weight (original in %s_noemu)'
                        % (self.info['mc_weight'], self.info['mc_weight'], self.info['mc_weight'])),
             added=['emu_weight', 'emu_range', '{mu}_emu_kill_L1', '{mu}_emu_kill_D1',
+                   '{mu}_emu_kill_mask (layers whose hits were removed, same bits as '
+                   '{mu}_pix_valid_mask)',
                    '{mu}_emu_routeB_ok', '{mu}_emu_delta_<param> (route B smearing, '
                    'NOT applied to any branch)'])
         with open(self.path.replace('.root', '.json'), 'w') as fh:
@@ -556,11 +597,17 @@ def report(a, km, tot, ctx, maps, tgt, mcnat, var, checks, has_bs, he=None):
          'MC events assigned to run ranges with the luminosity shares %s'
          % ' '.join('%.3f' % x for x in km.lumi),
          'selected MC events %d; event weight from data > MC cells: mean %.4f, min %.3f, '
-         'max %.3f, %.1f%% of events != 1'
+         'max %.3f, %.1f%% of events != 1, effective sample size %.3f of the events'
          % (tot['ev'], tot['w_sum'] / max(tot['ev'], 1), tot['w_min'], tot['w_max'],
-            100 * tot['w_ne1'] / max(tot['ev'], 1)),
-         'L1 hits removed: %.4f of the MC L1 hits on mapped cells' % (tot['killL1'] / max(tot['hitL1'], 1)),
-         'D1 hits removed: %.4f of the MC D1 hits on mapped cells' % (tot['killD1'] / max(tot['hitD1'], 1)),
+            100 * tot['w_ne1'] / max(tot['ev'], 1),
+            tot['w_sum'] ** 2 / max(tot['ev'] * tot['w_sum2'], 1e-300)),
+         'hits removed, as a fraction of the MC hits on mapped cells: %s'
+         % ', '.join('%s %.4f' % (s, tot.get('kill_' + s, 0) / max(tot.get('hit_' + s, 0), 1))
+                     for s in km.surfaces),
+         'muons that lost at least one hit: %.4f; of these, with a loss on L2-L4 / D2-D3: %.4f%s'
+         % (tot.get('kill_any', 0) / max(tot['mu'], 1),
+            tot.get('kill_other', 0) / max(tot.get('kill_any', 0), 1e-300),
+            ' (route B removes only the L1 / D1 hits of these)' if a.route and 'B' in a.route else ''),
          'muons left with no pixel hit: %.4f, with <= 2: %.4f (kept; the reconstruction '
          'would probably have lost some)' % (tot['nopix'] / max(tot['mu'], 1),
                                              tot['lowpix'] / max(tot['mu'], 1)),
