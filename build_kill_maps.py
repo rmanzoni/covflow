@@ -64,10 +64,11 @@ def parse_args():
     p.add_argument('--min-weight', type=float, default=0.2,
                    help='floor of the weight of MC tracks without the hit in cells '
                         'where data is more efficient (default %(default)s)')
-    p.add_argument('--max-weight', type=float, default=1.5,
+    p.add_argument('--max-weight', type=float, default=3.0,
                    help='cells where eps_data/eps_MC exceeds this cannot be '
                         'emulated (MC has (almost) no hits there) and are left '
-                        'unchanged and listed (default %(default)s)')
+                        'unchanged and listed (default %(default)s; was 1.5 until Oct 2026: '
+                        'on the full 2026 maps 3 halves the D1+ efficiency left missing)')
     p.add_argument('--fallback', choices=('mcshape', 'average'), default='mcshape',
                    help='data efficiency of cells with too few probes in the whole epoch: '
                         'mcshape = eps_MC of the cell x one data/MC factor per range '
@@ -288,12 +289,16 @@ def report_lines(km, runs, tab, segs, a):
         with np.errstate(divide='ignore', invalid='ignore'):
             emeas = np.where(dd > 0, km.d_num[s] / dd, 0.0)
         miss = float((dd * (emeas - np.nan_to_num(km.eps_m[s])[None]))[unc].sum() / max(dd.sum(), 1))
+        unc_in = unc & acc[None, :, None]
+        miss_in = float((dd * (emeas - np.nan_to_num(km.eps_m[s])[None]))[unc_in].sum()
+                        / max(dd[:, acc].sum(), 1))
         L.append('%-4s data probes by fallback level 0/1/2/3: %s'
                  % (s, ' '.join('%.3f' % x for x in bylev)))
-        L.append('     efficiency left missing in uncorrectable cells (emulated - data): %+.4f' % -miss)
+        L.append('     efficiency left missing in uncorrectable cells (emulated - data): %+.4f '
+                 '(all mapped cells), %+.4f (nominal acceptance only)' % (-miss, -miss_in))
         L.append('%-4s cells in acceptance with eps_data > eps_MC (reweighted): %.3f, '
                  'largest weight %.3f' % (s, frac, float(w.max())))
-        L.append('     data probes in UNCORRECTABLE cells (eps_data/eps_MC > %.2f, MC '
+        L.append('     data probes in UNCORRECTABLE cells, all mapped cells incl. disk edges (eps_data/eps_MC > %.2f, MC '
                  'nearly dead): %.4f' % (km.max_weight, lost))
     return L
 

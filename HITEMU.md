@@ -124,13 +124,13 @@ It stops when one of three things happens:
 
 ![run ranges](docs/hitemu_figs/f04_run_ranges_2026.png)
 
-*Black: L1 efficiency per run, full 2026 (from the effmaps run table). Orange: the 7 run ranges the segmentation finds on it, from ε = 0.66 down to 0.56 at the end of the year. Shaded: the 13 runs read by the 300k-event test, which therefore gets a single range.*
+*Black: L1 efficiency per run, full 2026 (from the effmaps run table). Orange: the 7 run ranges the segmentation finds on it, from ε = 0.66 down to 0.56 at the end of the year. Shaded: the 13 runs read by the 300k-event test, which therefore gets a single range. The full-year `build_kill_maps.py` run (section 9.6) found the same 7 ranges; one boundary is 2 runs off, because the real run also uses D1.*
 
 MC has no runs. Each MC event is assigned to a run range at random, with probability equal to the range's share of the luminosity. The proxy is the share of selected data events; brilcalc's recorded luminosity can be passed with `--lumi-csv`. The event is then treated with that range's maps.
 
-The same page in the kill-maps PDF (synthetic sample, 8 injected steps):
+The same page in the kill-maps PDF, real full-2026 run (top: L1, bottom: D1; orange: range averages, dashed: boundaries):
 
-![s01](docs/hitemu_figs/s01_km_runranges.png)
+![r02](docs/hitemu_figs/r02_full_runranges.png)
 
 ### 3.2 From probes to efficiency maps
 
@@ -155,7 +155,7 @@ How many cells fall back depends almost only on statistics and on z: the luminou
 
 ![probes per cell](docs/hitemu_figs/f05_probes_per_cell.png)
 
-*Expected L1 probes per kill-map cell (estimated from the full-2026 probe map, scaled). Green: own measurement (level 0). Orange: fallback. Violet: practically no probes. The test (left: 41% / 40% / 19%) matches the log line `1156/0/1276/640` (38% / 42% / 21%). With the full sample about half the cells of each run range are measured directly; the rest use level 1, i.e. the same cell over the neighbouring months. The right panel shows why the outer |z| region is empty in data and MC alike.*
+*Expected L1 probes per kill-map cell (estimated from the full-2026 probe map, scaled). Green: own measurement (level 0). Orange: fallback. Violet: practically no probes. The test (left: 41% / 40% / 19%) matches the log line `1156/0/1276/640` (38% / 42% / 21%). With the full sample about half the cells of each run range are measured directly; the rest use level 1, i.e. the same cell over the neighbouring months. In data probes rather than cells, the full-year run puts **95.6% of the L1 probes, 92.5% of D1+ and 87.9% of D1− in level-0 cells, and only 0.0–0.4% in level 2**: the fallback no longer matters. The right panel shows why the outer |z| region is empty in data and MC alike.*
 
 ### 3.4 From (ε_data, ε_MC) to an action
 
@@ -165,13 +165,13 @@ How many cells fall back depends almost only on statistics and on z: the luminou
 
 - **ε_data < ε_MC (most cells in 2025–2026):** each existing MC hit is removed with P_kill = 1 − ε_data/ε_MC. The MC efficiency becomes ε_MC · (1 − P_kill) = ε_data. Nothing is weighted.
 - **ε_data > ε_MC:** hits cannot be created. Instead, MC muons with a hit get weight w_hit = ε_data/ε_MC and those without get w_nohit = (1 − ε_data)/(1 − ε_MC), floored at 0.2. The weighted MC efficiency is then ε_data. The event weight is the product over the two muons.
-- **ε_data > 1.5 · ε_MC: "uncorrectable".** MC is (nearly) dead where data works: the weight would be large and carried by very few tracks. Nothing is done (weights 1). The emulated MC then stays below data in that cell, by ε_data − ε_MC.
+- **ε_data > 3 · ε_MC: "uncorrectable"** (`--max-weight`, default 3 since October 2026; it was 1.5). MC is (nearly) dead where data works: the weight would be large and carried by very few tracks. Nothing is done (weights 1). The emulated MC then stays below data in that cell, by ε_data − ε_MC.
 
 How much the uncorrectable cells matter, on the full 2026 sample:
 
 ![uncorrectable](docs/hitemu_figs/f07_uncorrectable_D1.png)
 
-*Left and middle: every D1 cell of full 2026, ε_data against ε_MC (point size ∝ data probes). Below the diagonal: hits are removed. Red, above the dashed line: uncorrectable. These are cells where Summer24 MC is partly dead and 2026 data is not (median ε_MC 0.11 against ε_data 0.39 on D1+). Right: the efficiency left missing after the emulation as a function of the cap. On D1+ it falls from 1.1% at the default cap 1.5 to 0.6% at cap 3. L1 is never a problem: data is almost everywhere worse than MC there.*
+*Left and middle: every D1 cell of full 2026, ε_data against ε_MC (point size ∝ data probes). Below the diagonal: hits are removed. Red, above the dashed line: uncorrectable. These are cells where Summer24 MC is partly dead and 2026 data is not (median ε_MC 0.11 against ε_data 0.39 on D1+). Right: the efficiency left missing after the emulation as a function of the cap. On D1+ it falls from 1.1% at cap 1.5 to 0.6% at cap 3. L1 is never a problem: data is almost everywhere worse than MC there. On the kill maps' own (coarser) cells most of the D1+ uncorrectable probes turn out to sit at the outer edge of the disk (section 9.6).*
 
 ### 3.5 What to look at in `killmaps_<epoch>.pdf`
 
@@ -488,6 +488,73 @@ On the synthetic samples the same code runs at ~30k events/s, so the 511 events/
 
 **Not in the test PDF:** a pixel-hit panel (added now, third row of the context page), the routes (not requested) and the mixture test (`noL1_data_study.py` was not run).
 
+### 9.6 Second iteration: the full-2026 kill maps
+
+`build_kill_maps.py` was rerun on the whole of 2026: 4.78M data events (777k selected), all of the MC, the new level-2 fallback, cap 1.5. The emulation was not rerun, so `emu_2026.pdf` is still the one of section 9.5.
+
+**What the full statistics give**
+
+| | test (300k events) | full 2026 |
+|---|---|---|
+| run ranges | 1 | **7** (L1 ε 0.633 → 0.662 → 0.639 → 0.604 → 0.613 → 0.581 → 0.560) |
+| L1 data probes in level-0 / level-2 cells | 86.5% / 13.5% | **95.6% / 0.4%** (4.0% level 1) |
+| D1+ data probes in level-0 / level-2 cells | 10.4% / 89.6% | **92.5% / 0.1%** |
+| D1− data probes in level-0 / level-2 cells | 11.3% / 88.7% | **87.9% / 0.0%** |
+| expected per-cell closure (emulated − data), nominal acceptance, cap 1.5 | L1 −0.003, D1 −0.005 / −0.014 (old fallback) | **L1 −0.0003, D1+ −0.0020, D1− −0.0017** |
+
+The cells now carry their own measurement and the closure is at the per-mille level. The remaining −0.002 on the disks are real uncorrectable cells: MC dead, data alive.
+
+**How the dead modules evolve during the year**
+
+![r03](docs/hitemu_figs/r03_full_L1_pkill.png)
+
+*L1 P_kill per run range (black = data dead where MC works). Dead blocks appear and grow over the year: the region around z ≈ −10…0 cm, φ ≈ −1 rad becomes a large dead area from range 3 onwards. One map for the whole year would smear this over all of the MC. The flat orange band at |z| > 18 cm is the level-2 region: MC pattern × one factor.*
+
+**The disks**
+
+![r04](docs/hitemu_figs/r04_full_D1p_summary.png)
+
+*D1+ over the whole year:*
+
+- *left: data efficiency;*
+- *middle: MC efficiency;*
+- *right: largest weight; grey = uncorrectable.*
+
+*Inner ring (r < 9 cm): data has inefficient "spokes" (blades) that MC does not have, so they are killed, plus a few MC-dead spokes that data does not have, so they are reweighted (blue, e.g. φ ≈ −1.6). Outer ring: grey, uncorrectable.*
+
+![D1 edge](docs/hitemu_figs/f15_D1_edge.png)
+
+*Left and middle: D1 efficiency against the radius of the crossing, summed over φ and the year. Red bars: data probes in uncorrectable cells. Right: efficiency left missing after the emulation as a function of `--max-weight`, all mapped cells (solid) and nominal acceptance only (dashed).*
+
+New finding: **data and MC do not agree on where the disks end**.
+
+- On D1+ the data efficiency drops ~1.5 mm further out than in MC: ε at r ≈ 15.8 cm is 0.13 in data against 0.06 in MC.
+- On D1− it drops ~3 mm further in.
+
+The sign flips between the two sides, and the size changes with φ. That points to a mm-scale difference between data and MC in where the disks sit relative to the reconstructed track: mainly a z shift, plus a smaller transverse part. These are not dead modules. The emulation handles it cell by cell:
+
+- on D1− the extra loss is killed;
+- on D1+ the extra hits are reweighted, up to the cap.
+
+Of the 3.5% of D1+ data probes counted as uncorrectable at cap 1.5, 3.1% are these edge cells, outside the nominal acceptance (4.5 < r < 14.8 cm). The rest are MC-dead spokes.
+
+- **Default cap raised to 3** (`--max-weight`): what stays missing on D1+ drops from 0.92% to 0.37% (all cells), and to 0.00% inside the nominal acceptance.
+- Inner ring: data is ~10% less efficient than MC on both disks at r < 9 cm. This is the largest D1 effect, and the kill reproduces it.
+
+**Do the conclusions change?**
+
+1. **D1 closure (9.3):** confirmed fixed. With full statistics the fallback affects < 0.5% of the probes, and the expected closure is −0.002 or better.
+2. **Run ranges (3.1):** confirmed. 7 ranges, as predicted from the efficiency maps; the dead areas move during the year, so they are needed.
+3. **Uncorrectable cells:** smaller than the test suggested, and mostly the D1+ outer edge rather than dead modules. Handled by the cap of 3.
+4. **Main finding (9.2), L2/L3 and D2 loss:** unchanged. It comes from the emulation's "next layer is valid" assumption, not from the maps; the full maps can't change it. It still needs the per-layer hit mask (Bmmm patch).
+
+**Next run** (tcsh; no need to rebuild the maps, the cap is applied when they are loaded):
+
+```tcsh
+python inspect_killmaps.py test_km/killmaps_2026 --max-weight 1.5 3
+python emulate_hit_loss.py --epoch 2026 --killmaps test_km/killmaps_2026 --max-weight 3 --closure-only --out test_emu_full
+```
+
 ---
 
 ## 10. Approximations, open items, speed
@@ -496,7 +563,7 @@ On the synthetic samples the same code runs at ~30k events/s, so the 511 events/
 2. **Two hits on one layer** (module overlaps) count as one when killed: for those tracks n_pix stays 1 too high.
 3. **Tracks left with ≤ 2 pixel hits are kept**; the reconstruction would have lost some of them (0.1% have none).
 4. **MC share per run range** = share of selected data events, which includes trigger and selection efficiency. `--lumi-csv` takes the brilcalc recorded luminosity instead.
-5. **Uncorrectable cells** (MC dead where data works) cannot be emulated by removing hits. With the default cap 1.5 they leave ~1% of D1+ efficiency missing in 2026 (full-year maps); cap 3 halves it at the price of weights up to 3.
+5. **Uncorrectable cells** (MC dead where data works) cannot be emulated by removing hits. In 2026 they are mostly the D1+ outer edge, where data's disk extends ~1.5 mm further than MC's (section 9.6). With cap 1.5 they leave 0.9% of the D1+ efficiency missing; with the new default cap 3, 0.4%, at the price of weights up to 3 on those few tracks. Inside the nominal acceptance it is below 0.2% on every surface.
 6. **Fallback cells** (level 2) take MC's pattern scaled to the data total: data-only dead modules in a sparse cell are spread over the surface. They hold few probes by definition, and with the full sample most of them become level 1 (same cell, neighbouring months).
 7. **Route B hit errors** are one (σ_u, σ_v) per \|η\| bin. Tracks whose own error is larger are redone with a larger V (reported as `inflated`).
 8. **Route A** uses the flows as trained on non-emulated MC: f_MC is evaluated at the original context, where MC is plentiful.
@@ -528,7 +595,7 @@ On the synthetic samples the same code runs at ~30k events/s, so the 511 events/
 | | `--min-cell-probes` | 40 | minimum mean probes per L1 cell in a range (× 3072 = minimum per range) |
 | | `--min-gain` | 25 | minimum −2 ln L gain to split |
 | | `--min-cell` | 30 | probes for a cell's own value (else fallback) |
-| | `--max-weight` | 1.5 | ε_data/ε_MC above which a cell is uncorrectable |
+| | `--max-weight` | 3 | ε_data/ε_MC above which a cell is uncorrectable (1.5 until Oct 2026) |
 | | `--min-weight` | 0.2 | floor of w_nohit |
 | | `--nbins-phi`, `--nbins-r` | 48, 20 | cell granularity (L1 z is fixed to the ROC pitch) |
 | | `--lumi-csv` | – | brilcalc csv for the MC shares |
@@ -540,6 +607,7 @@ On the synthetic samples the same code runs at ~30k events/s, so the 511 events/
 | | `--write-tree` | off | write the emulated MC tree (route B) for retraining |
 | | `--closure-only` | off | only hit killing and closure; no covariance / beam-spot branches, no routes (fast) |
 | | `--fallback` | as stored | re-finalise the kill maps with another level-2 fallback (maps from before Oct 2026: `mcshape`) |
+| | `--max-weight` | as stored | re-finalise the kill maps with another cap (no need to rebuild them) |
 | all | `--max-events` | all | read only the first N events (= first runs) |
 
 ### Outputs per epoch (`run_hitemu.csh`)

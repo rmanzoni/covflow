@@ -102,6 +102,9 @@ def parse_args():
                    help='re-finalise the kill maps with this level-2 fallback '
                         '(default: the one stored in the maps; maps written before '
                         'Oct 2026 get mcshape)')
+    p.add_argument('--max-weight', type=float, default=None,
+                   help='re-finalise the kill maps with this cap on eps_data/eps_MC '
+                        '(default: the one stored in the maps)')
     p.add_argument('--out', default=None, help='default: emu_<epoch>')
     p.add_argument('--png', action='store_true')
     a = p.parse_args()
@@ -200,8 +203,8 @@ def main():
     t0 = time.time()
     rng = np.random.default_rng(a.seed)
     info = P.load_epoch(a)
-    km = H.KillMaps.load(a.killmaps, fallback=a.fallback)
-    print('kill maps %s, level-2 fallback: %s' % (a.killmaps, km.fallback))
+    km = H.KillMaps.load(a.killmaps, fallback=a.fallback, max_weight=a.max_weight)
+    print('kill maps %s, level-2 fallback: %s, max weight %.2f' % (a.killmaps, km.fallback, km.max_weight))
     timing = {}
     if km.meta.get('epoch') != a.epoch:
         die('kill maps are for epoch %s, not %s' % (km.meta.get('epoch'), a.epoch))
