@@ -794,7 +794,13 @@ This is a limitation of the "one hit error per bin" model, not of the method. Th
 
 ## 10. Approximations, open items, speed
 
-1. **No per-layer hit mask** (section 9.2). After a kill, the next crossed layer is assumed valid, and L2–L4 / D2–D3 cannot be emulated. This is the dominant residual in 2026. Fix: `{mu}_pix_valid_mask` in Bmmm.
+1. **No per-layer hit mask** (section 9.2). After a kill, the next crossed layer is assumed valid, and L2–L4 / D2–D3 cannot be emulated. This is the dominant residual in 2026. **Fix written** (Bmmm branch `pix-layer-masks`, October 2026), as new muon branches from `bestTrack()`:
+   - `{mu}_pix_valid_mask`: layers with a valid hit;
+   - `{mu}_pix_miss_mask`: layers crossed on an active module without a hit;
+   - `{mu}_pix_inact_mask`: layers crossed on an inactive or bad module;
+   - `{mu}_pix_hit_count`: valid hits per layer, 2 bits per layer.
+
+   Bits 0–3 are BPix L1–L4, bits 4–6 FPix D1–D3. They need a new ntuple production (dimuon at least); the kill maps and the emulation are then extended to all seven surfaces.
 2. **Two hits on one layer** (module overlaps) count as one when killed: for those tracks n_pix stays 1 too high.
 3. **Tracks left with ≤ 2 pixel hits are kept.** Checked on full 2026 (section 9.7): data has even more of them (10.8% against 9.6%; no pixel hit 0.54% against 0.11%), so keeping them is right.
 4. **MC share per run range** = share of selected data events, which includes trigger and selection efficiency. `--lumi-csv` takes the brilcalc recorded luminosity instead.
