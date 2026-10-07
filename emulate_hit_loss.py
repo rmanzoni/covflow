@@ -673,10 +673,11 @@ def plots(a, km, lines, ctx, maps, tgt, mcnat, var, sig_d, sig_m, ab, AB_EDGES, 
         e_dat, e_emu, diff = r['maps']
         fig = plt.figure(figsize=(18, 5.6) if s == 'L1' else (18, 6.2))
         P.draw_map(fig, (1, 3, 1), surf, e_dat, 'data, measured (cells with >= %g probes)'
-                   % km.min_cell, 'viridis', 0, 1, 'eps')
-        P.draw_map(fig, (1, 3, 2), surf, e_emu, 'MC after emulation', 'viridis', 0, 1, 'eps')
-        P.draw_map(fig, (1, 3, 3), surf, diff, 'emulated MC - data (measured cells): %+.4f'
-                   % (r['emu_meas'] - r['data_meas']), 'RdBu_r', -0.1, 0.1, 'difference')
+                   % km.min_cell, 'viridis', 0, 1, 'hit efficiency (eps)')
+        P.draw_map(fig, (1, 3, 2), surf, e_emu, 'MC after emulation', 'viridis', 0, 1,
+                   'hit efficiency (eps)')
+        P.draw_map(fig, (1, 3, 3), surf, diff, 'hit efficiency, emulated MC - data (measured cells): %+.4f'
+                   % (r['emu_meas'] - r['data_meas']), 'RdBu_r', -0.1, 0.1, 'hit efficiency difference')
         fig.suptitle('%s per-cell closure, epoch %s' % (s, a.epoch), fontsize=13)
         fig.tight_layout()
         book.add(fig, '%s_closure' % s.replace('+', 'p').replace('-', 'm'))

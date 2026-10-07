@@ -248,6 +248,7 @@ def report_lines(km, runs, tab, segs, a):
          '            (at most %d ranges, each >= %d L1 probes, split gain > %g in -2lnL)'
          % (a.max_ranges, km.meta['min_den_per_range'], a.min_gain),
          'MC share  : %s' % km.meta['lumi_kind'],
+         'eps       = HIT EFFICIENCY of a cell = probes with a valid hit / probes (eps_data: data, eps_MC: MC)',
          'P_kill    = 1 - eps_data/eps_MC where eps_data < eps_MC (else 0)',
          'weights   = eps_data/eps_MC (hit) and (1-eps_data)/(1-eps_MC) (no hit)',
          '            where eps_data > eps_MC: bounded by 1/eps_MC',
@@ -322,7 +323,7 @@ def plot(km, runs, tab, segs, lines, stem, a):
             ax.hlines(e, i - 0.5, j - 0.5, color='#d95f02', lw=2)
             if i > 0:
                 ax.axvline(i - 0.5, color='#1b9e77', lw=1, ls='--')
-        ax.set_ylabel('eps_data(%s), per run' % lab)
+        ax.set_ylabel('hit efficiency eps_data(%s), per run' % lab)
     step = max(1, len(runs) // 14)
     axes[-1].set_xticks(idx[::step])
     axes[-1].set_xticklabels([str(r) for r in runs[::step]], rotation=45, fontsize=8)
@@ -344,21 +345,25 @@ def plot(km, runs, tab, segs, lines, stem, a):
                 M = km.eps_d[s][k] if what == 'eps_data' else \
                     np.where(np.isfinite(km.eps_d[s][k]), km.p_kill[s][k], np.nan)
                 ax = P.draw_map(fig, (nrow, ncol, k + 1), surf, M,
-                                'range %d: %d-%d' % (k, *km.ranges[k]), cmap, vmin, vmax, what)
+                                'range %d: %d-%d' % (k, *km.ranges[k]), cmap, vmin, vmax,
+                                {'eps_data': 'data hit efficiency (eps_data)',
+                                 'P_kill': 'P_kill = 1 - eps_data/eps_MC'}[what])
                 ax.title.set_fontsize(9)
-            fig.suptitle('%s %s per run range, epoch %s' % (s, what, a.epoch), fontsize=12)
+            fig.suptitle('%s %s per run range, epoch %s' % (
+                s, {'eps_data': 'data hit efficiency eps_data', 'P_kill': 'kill probability P_kill'}[what],
+                a.epoch), fontsize=12)
             fig.tight_layout()
             book.add(fig, '%s_%s' % (s.replace('+', 'p').replace('-', 'm'), what))
         fig = plt.figure(figsize=(18, 5.6) if s == 'L1' else (18, 6.2))
         ed = km.lumi_avg_eps_data(s)
-        P.draw_map(fig, (1, 3, 1), surf, ed, 'eps_data, luminosity-weighted over ranges',
-                   'viridis', 0, 1, 'eps_data')
-        P.draw_map(fig, (1, 3, 2), surf, km.eps_m[s], 'eps_MC (PU-weighted, after fallback)',
-                   'viridis', 0, 1, 'eps_MC')
+        P.draw_map(fig, (1, 3, 1), surf, ed, 'data hit efficiency eps_data, luminosity-weighted over ranges',
+                   'viridis', 0, 1, 'hit efficiency, data (eps_data)')
+        P.draw_map(fig, (1, 3, 2), surf, km.eps_m[s], 'MC hit efficiency eps_MC (PU-weighted, after fallback)',
+                   'viridis', 0, 1, 'hit efficiency, MC (eps_MC)')
         wmax = np.where(km.uncorrectable[s].any(0), np.nan, km.w_hit[s].max(0))
         P.draw_map(fig, (1, 3, 3), surf, np.where(np.isfinite(ed), wmax, np.nan),
                    'largest hit weight over ranges\n(grey inside acceptance: uncorrectable)',
-                   'Blues', 1, km.max_weight, 'eps_data/eps_MC')
+                   'Blues', 1, km.max_weight, 'ratio of hit efficiencies eps_data/eps_MC')
         fig.suptitle('%s summary, epoch %s' % (s, a.epoch), fontsize=13)
         fig.tight_layout()
         book.add(fig, '%s_summary' % s.replace('+', 'p').replace('-', 'm'))

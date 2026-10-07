@@ -406,6 +406,7 @@ def summary_lines(a, counts, hist, fit, test):
          'W1 hit present, working cell (eps >= %.2f)   W0 hit missing, working cell'
          % a.eps_working,
          'D0 hit missing, dead cell (eps <= %.2f)       "missing" = next layer/disk is the first'
+         '\neps = HIT EFFICIENCY of the cell in data (probes with a valid hit / probes)'
          % a.eps_dead, '']
     for fam in FAMILIES:
         c = counts[fam]

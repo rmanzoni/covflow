@@ -739,8 +739,8 @@ def page_main(book, s, ed, em, epoch):
     # percent-level structure elsewhere is not washed out by them.
     lim = np.nanpercentile(np.abs(delta), 95) if np.isfinite(delta).any() else 0.1
     lim = float(np.clip(lim, 0.02, 0.2))
-    draw_map(fig, (1, 3, 1), s, ed, 'data: eps = probes with a hit / probes', 'viridis', 0, 1, 'eps_data')
-    draw_map(fig, (1, 3, 2), s, em, 'MC (PU-weighted)', 'viridis', 0, 1, 'eps_MC')
+    draw_map(fig, (1, 3, 1), s, ed, 'data: eps = probes with a hit / probes', 'viridis', 0, 1, 'hit efficiency, data (eps_data)')
+    draw_map(fig, (1, 3, 2), s, em, 'MC (PU-weighted)', 'viridis', 0, 1, 'hit efficiency, MC (eps_MC)')
     draw_map(fig, (1, 3, 3), s, delta, 'eps_data - eps_MC', 'RdBu_r', -lim, lim, 'eps_data - eps_MC')
     fig.suptitle('%s hit efficiency, epoch %s    (grey = fewer than the minimum '
                  'number of probes)' % (s.name, epoch), fontsize=13)
@@ -830,7 +830,7 @@ def page_projections(book, s, rd, rm, epoch):
         eb(ax, x, xerr, em, sm, 'MC', '#d95f02', 's')
         lo = np.nanmin(np.concatenate([ed, em])) if np.isfinite(np.concatenate([ed, em])).any() else 0
         ax.set_ylim(max(0.0, lo - 0.05), 1.01)
-        ax.set_ylabel('eps(%s)' % s.name)
+        ax.set_ylabel('hit efficiency eps(%s)' % s.name)
         ax.legend(loc='lower left')
         plt.setp(ax.get_xticklabels(), visible=False)
         with np.errstate(divide='ignore', invalid='ignore'):
@@ -908,7 +908,7 @@ def page_runs(book, rd, bases, a, epoch):
         ax.errorbar(idx, eps, yerr=err, fmt='o', ms=3, color='k', elinewidth=0.8)
         tot = n.sum() / d.sum()
         ax.axhline(tot, color='#d95f02', lw=1, label='epoch average %.4f' % tot)
-        ax.set_ylabel('eps_data(%s)' % b)
+        ax.set_ylabel('hit efficiency eps_data(%s)' % b)
         step = max(1, len(g) // 12)
         ax.set_xticks(idx[::step])
         ax.set_xticklabels(['%d' % x[0] for x in g][::step], rotation=45, fontsize=8)

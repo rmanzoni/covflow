@@ -2,7 +2,13 @@
 
 *What the scripts `build_kill_maps.py`, `noL1_data_study.py` and `emulate_hit_loss.py` do, why, how to read their output, and what the first 2026 test showed.*
 
-Figures with a name starting with `f` are drawings, or are made from real 2026 numbers: the full-2026 efficiency maps of `pixel_eff_maps.py` and the 300k-event test of October 2026. Figures with a name starting with `s` are pages of the scripts' own PDFs, produced on **synthetic** samples. They show what a page looks like, not CMS results.
+Figure names tell where a figure comes from:
+
+- **`f…`**: drawings, or plots made from real 2026 numbers;
+- **`r…`**: pages of the scripts' own PDFs, run on the **real 2026 data and Summer24 MC** (October 2026);
+- **`s…`**: pages produced on **synthetic** samples. Only two are left (the route A/B pages in section 7.4), because routes A and B have not been run on real data yet. They show what those pages look like, not CMS results.
+
+**ε, written `eps` in the code, plots and logs, is not an acronym:** it is the Greek letter epsilon and always means **hit efficiency** (section 1).
 
 ---
 
@@ -68,6 +74,31 @@ Reweighting MC in (pt, η, φ, z0) to the data hit pattern does not work: the hi
 | **TV (total variation)** | distance between two distributions: ½ Σ \|f_data − f_MC\|. 0 = identical, 1 = disjoint. It equals the fraction of MC tracks that would have to change category to match data (section 5). |
 | **W1, W0, D0** | data tracks crossing a working L1 cell with a hit (W1) or without a hit (W0), and crossing a dead L1 cell, hence without a hit (D0) (section 6). |
 | **route A, route B** | two independent ways to compute the covariance of an MC track after its hit is removed (section 7). |
+
+**Abbreviations and symbols**
+
+| short | spelled out |
+|---|---|
+| **ε, `eps`** | **hit efficiency** (Greek epsilon; not an acronym). `eps_data`, `eps_MC`: in data, in MC. `--eps-dead`, `--eps-working`: hit-efficiency thresholds for dead and working cells |
+| BPix, FPix | barrel pixel detector, forward pixel detector |
+| L1–L4 | BPix layers 1–4 (L1 innermost, r = 2.9 cm) |
+| D1–D3, D1± | FPix disks 1–3; + / − = the disk at positive / negative z |
+| ROC | readout chip: a pixel module is read by 16 ROCs; the L1 cells are one ROC wide in z |
+| PV | primary vertex |
+| PCA | point of closest approach of the track to the beam line (where its parameters are given) |
+| PU | pile-up; `pu_weight_<year>` reweights the MC pile-up to data |
+| MC | Monte Carlo simulation (here Summer24 for 2024–2026) |
+| P_kill | probability to remove an MC hit in a cell |
+| w_hit, w_nohit | weights of MC muons with / without the hit in cells where data has the higher hit efficiency |
+| W1, W0, D0 | Working cell with hit, Working cell without hit, Dead cell (without hit) |
+| TV | total variation (distance between two distributions) |
+| KS | Kolmogorov–Smirnov distance (largest difference of two cumulative distributions) |
+| C, C′ | track covariance matrix (5×5) before / after removing a hit |
+| H, V | how the hit position depends on the track parameters (2×5); hit position error (2×2) |
+| PD | positive definite (a valid covariance matrix) |
+| σ(d_xy), σ(d_sz) | uncertainties of the transverse and longitudinal impact parameters |
+| IP | impact parameter |
+| q/p, λ, φ, d_xy, d_sz | the five track parameters: charge/momentum, dip angle, azimuth, transverse and longitudinal impact parameters |
 
 ---
 
@@ -222,9 +253,9 @@ Two checks, both in `emu_<epoch>.pdf` and in the printed summary.
 
 By construction emulated = data, except in uncorrectable cells (MC stays lower) and through the fallback approximations. (The first version compared with the kill-map values instead of the raw counts, which in sparse cells are the fallback values themselves. That hid where the problem was; see section 9.3.)
 
-![s02](docs/hitemu_figs/s02_emu_L1closure.png)
+![r05](docs/hitemu_figs/r05_full_L1_closure.png)
 
-*Synthetic example: data map, emulated MC map, difference. The difference should be noise, plus blue spots in uncorrectable cells.*
+*Real page, full 2026, L1. Left: measured data hit efficiency ε per cell. Middle: hit efficiency of the emulated MC. Right: emulated − data. The difference is noise in the centre, with a few structured cells at |z| > 15 cm; the average is −0.0030 (section 9.7).*
 
 **Context closure.** This is what covflow actually sees. Two distributions are compared, in each \|η\| bin:
 
@@ -237,9 +268,15 @@ Each is compared for data, MC before and MC emulated, and summarised by the tota
 
 *What a TV number means: 0.10 = 10% of the MC muons are in the wrong category. "MC before 0.315, emulated 0.063" means the fraction of misplaced MC muons fell from 31% to 6%.*
 
-![s03](docs/hitemu_figs/s03_emu_context.png)
+![r06](docs/hitemu_figs/r06_full_context.png)
 
-*Synthetic example of the context page: first BPix layer (top) and first FPix disk (bottom) per |η| bin. Black data, grey MC before, orange MC emulated. The page now has a third row with the number of pixel hits. The real 2026 page is in section 9.5.*
+*Real context page, full 2026. Per |η| bin (columns):*
+
+- *top: first BPix layer;*
+- *middle: first FPix disk;*
+- *bottom: number of pixel hits.*
+
+*Black: data. Grey: MC before. Orange: MC after the emulation. The orange points follow the black ones at L1 and L2 but stay ~10× below them at L3/L4, at D3, and in the low-hit tail. That is the missing L2/L3/D2 loss of section 9.2.*
 
 ---
 
@@ -266,9 +303,9 @@ It then compares the distributions of log10 σ of the five track parameters for 
 - **W0 ≈ D0** (median shift < 0.01 in log10 σ, i.e. 2%; width ratio < 1.1; KS < 0.05): the no-L1 tracks in data are one population. Route A's target is clean.
 - **W0 ≠ D0:** the no-L1 data tracks are a mixture. Route A would give the emulated losses the wrong tails. Use route B, or take the target from D0 only.
 
-![s06](docs/hitemu_figs/s06_nol1_mixture.png)
+![r08](docs/hitemu_figs/r08_nol1_L1_data.png)
 
-*Synthetic example: a 3% population of "rejected hit" tracks was injected in the data on L1. W0 (orange) shows a tail that D0 (black) does not have, and the test flags it. On D1 nothing was injected and W0 = D0.*
+*Real page, full 2026 data, L1: log10 σ of the five track parameters for W1 (blue, with hit), W0 (orange) and D0 (black), all reweighted to D0. W0 lies on D0 (one population, the test passes; section 9.8), and both are ~0.2 in log10 above W1 in σ(d_xy) and σ(d_sz). A failing test would show W0 with its own tail or shifted peak.*
 
 The same script also fits the **hit errors V** used by route B (section 7.2), and with `--sample mc` it does the same on MC.
 
@@ -315,13 +352,33 @@ The ingredients:
 - **H (2×5):** how the hit position (two local coordinates on the module) moves when the five track parameters (q/p, λ, φ, d_xy, d_sz) move. Computed from the helix by finite differences.
 - **V (2×2):** the hit position error, diag(σ_u², σ_v²), per surface and \|η\| bin. It is not in the ntuple, so `noL1_data_study.py` **fits** it: V is chosen so that W1 tracks (with the hit), after removing it, have the same median σ(d_xy) and σ(d_sz) as D0 tracks (without it) at the same (pt, η, position). A V that is too large removes too little information; one that is too small removes too much.
 
-The result is MC-like ("B, raw"). covflow then corrects it like any MC track ("B, final"). The check "B, raw against MC's own tracks without L1" must close, and it does on synthetic samples to within 0.01 in log10 σ.
+The result is MC-like ("B, raw"). covflow then corrects it like any MC track ("B, final"). The check "B, raw against MC's own tracks without L1" must close. It does on synthetic samples (within 0.01 in log10 σ), but **not on real 2026 data and MC beyond |η| ≈ 0.5** with one V per |η| bin (section 9.8).
 
-![s07](docs/hitemu_figs/s07_nol1_V.png)
+![r11](docs/hitemu_figs/r11_nol1_V_data.png)
 
-*Synthetic example: fitted effective hit errors per |η| bin for L1 and D1. A bin with too few D0 tracks is flagged UNCONSTRAINED and takes its value from the neighbours, or from another sample or epoch (`--hit-errors a.json b.json`, first file with a fit wins).*
+*Real page, full 2026 data: fitted hit errors per |η| bin; left σ_u (rφ), right σ_v (z on L1, r on D1).*
+
+- *L1: σ_u ≈ 34–42 µm, while σ_v rises from 54 to 213 µm with |η|. Above |η| = 0.5 these values are pinned by the positive-definiteness limit and are too large (section 9.8).*
+- *D1: at the 500 µm upper limit, flagged UNCONSTRAINED. Removing D1 changes nothing measurable.*
+
+*A bin without a fit takes its value from the neighbours, or from another file (`--hit-errors a.json b.json`, first file with a fit wins).*
 
 ### 7.4 What the route pages show
+
+Real 2026 page **without routes** (they have not been run on real data yet):
+
+![r07](docs/hitemu_figs/r07_full_L1_cov.png)
+
+*Full 2026, the MC muons that lost L1 in the emulation:*
+
+- *grey dashed: their unchanged "with L1" covariance;*
+- *black solid: the target, data tracks in dead L1 cells;*
+- *black dotted: all data tracks without L1;*
+- *blue dotted: MC tracks that naturally lack L1.*
+
+*In σ(d_xy) and σ(d_sz) the grey curve is ~0.25 in log10 below the target. This gap is what the routes must close.*
+
+With routes the same page gains three curves. Until they are run on real data, here is a **synthetic** example:
 
 ![s04](docs/hitemu_figs/s04_emu_routesL1.png)
 
@@ -337,7 +394,7 @@ The result is MC-like ("B, raw"). covflow then corrects it like any MC track ("B
 
 ![s05](docs/hitemu_figs/s05_emu_AvsB.png)
 
-*Synthetic example: route A against route B (final), track by track, in log10 σ(d_xy) and σ(d_sz). A narrow diagonal means the two routes agree for each track, not only on average.*
+*Synthetic example (no real equivalent yet): route A against route B (final), track by track, in log10 σ(d_xy) and σ(d_sz). A narrow diagonal means the two routes agree for each track, not only on average.*
 
 ---
 
