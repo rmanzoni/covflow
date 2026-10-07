@@ -6,7 +6,8 @@ Figure names tell where a figure comes from:
 
 - **`f…`**: drawings, or plots made from real 2026 numbers;
 - **`r…`**: pages of the scripts' own PDFs, run on the **real 2026 data and Summer24 MC** (October 2026);
-- **`s…`**: pages produced on **synthetic** samples. Only two are left (the route A/B pages in section 7.4), because routes A and B have not been run on real data yet. They show what those pages look like, not CMS results.
+- **`s…`**: pages produced on **synthetic** samples. Only two are left (the route A/B pages in section 7.4), because routes A and B have not been run on real data yet. They show what those pages look like, not CMS results;
+- **`e…`**: plots made from the outputs of the **per-epoch run of 7 October 2026** (all seven Run 3 epochs, section 10).
 
 **ε, written `eps` in the code, plots and logs, is not an acronym:** it is the Greek letter epsilon and always means **hit efficiency** (section 1).
 
@@ -24,8 +25,9 @@ Figure names tell where a figure comes from:
 7. [Step 5: the covariance of a track that lost a hit, routes A and B](#7-step-5-routes-a-and-b)
 8. [How to choose between A and B](#8-how-to-choose-between-a-and-b)
 9. [Worked example: the 2026 test, number by number](#9-worked-example-the-2026-test)
-10. [Approximations, open items, speed](#10-approximations-open-items-speed)
-11. [Reference: files, options, outputs](#11-reference)
+10. [All Run 3 epochs: the run of 7 October 2026, and its oddities](#10-all-run-3-epochs)
+11. [Approximations, open items, speed](#11-approximations-open-items-speed)
+12. [Reference: files, options, outputs](#12-reference)
 
 ---
 
@@ -656,7 +658,7 @@ python emulate_hit_loss.py --epoch 2026 --killmaps test_km/killmaps_2026 --max-w
 | D1− | 0.8124 | 0.8826 | 0.8102 | **−0.0022** |
 
 - **Disks:** the −0.002 is what the uncorrectable cells must leave (section 9.6).
-- **L1:** −0.003 is a little more than the maps alone predict (−0.0003), but still 0.5% of the efficiency. The L1 closure map shows where it comes from. The centre is noise; the residual sits in a few cells at |z| > 15 cm, which borrow their value from the neighbouring run ranges (level 1) and are scaled by the surface's time trend. It is second-order; finer or wider cells at large |z| would reduce it if needed.
+- **L1:** −0.003 is a little more than the maps alone predict (−0.0003), but still 0.5% of the efficiency. ~~The residual sits in a few cells at |z| > 15 cm, which borrow their value from the neighbouring run ranges.~~ **Corrected in section 10.4 (all epochs):** the −0.0026 of it is explained by a different effect. A cell yields fewer selected data muons in the run ranges where it is dead, so the data average over ranges weights its good ranges more than the MC (which is assigned to ranges by luminosity) does.
 
 ![L1 closure](docs/hitemu_figs/r05_full_L1_closure.png)
 
@@ -676,7 +678,7 @@ python emulate_hit_loss.py --epoch 2026 --killmaps test_km/killmaps_2026 --max-w
 - 83% of what is left comes from the L2/L3 bins.
 - L1 loss is right (60.6% against 60.9%). Starting at L3/L4 is 12× too rare; starting at D3 is 10× too rare.
 
-**4. Pixel hits: the open question of section 10 (item 3) is answered.** Data has *more* low-hit muons than the emulation:
+**4. Pixel hits: the open question of section 11 (item 3) is answered.** Data has *more* low-hit muons than the emulation:
 
 - ≤ 2 pixel hits: 10.8% in data against 9.6% emulated;
 - no pixel hit at all: 0.54% against 0.11%.
@@ -851,7 +853,239 @@ The emulated tree was checked entry by entry, for every muon:
 
 ---
 
-## 10. Approximations, open items, speed
+## 10. All Run 3 epochs
+
+*`run_hitemu.csh` was run on all seven epochs on 7 October 2026 (t3ui07, about 2 h 20 min in total). The code was from before the per-layer masks, so only L1, D1+ and D1− are emulated. Settings: cap 3, `mcshape` fallback, and still the old floor `min_weight` 0.2 (stored in every map). This section reads every output and lists what is odd, with the reason where it was found.*
+
+### 10.0 The oddities in one table
+
+Ranked by how much they matter for the analysis. "Section" points to the explanation below.
+
+| # | what is odd | why | matters? | section |
+|---|---|---|---|---|
+| 1 | **Route A did not run in any epoch.** The summary says `OK_B`, never `OK_AB`. | No `covflow.json` found under `$RUNS/<epoch>/mu{1,2}/task_0` (`RUNS = …/run3_epochs_05oct26`): wrong tag or path, or production not finished | **yes**: route A is the primary route, and without flows the route checks only compare *raw* MC to data | 10.1, 10.11 |
+| 2 | **2024 D1−: emulated hit efficiency 4.2% below data** (all other surfaces and epochs: −0.1% to −0.3%) | Summer24 MC has a dead D1− sector (upper left, φ ≈ 2.4–3.1 rad) that data only lost at run ~382799. Before that (37% of 2024), data has hits that MC cannot provide (uncorrectable cells, 11% of D1− probes) | yes, for 2024: ~0.6% of the 2024 muons are on the wrong side | 10.5 |
+| 3 | **2024, 2025 and 2026 use one and the same MC** (3,627,107 events), and **2025 and 2026 have bit-identical MC maps and no-L1 MC outputs** | One Summer24 sample for three years; `pu_weight_2026` gives exactly the same weights as `pu_weight_2025` | the PU profile of 2026 is not used; the Summer24 conditions (snapshot, see #2) for 2025–26 | 10.6 |
+| 4 | **The L1 closure gets worse with time:** −0.09% (2024), −0.18% (2025), −0.30% (2026) | **A dead cell yields 2–9% fewer *selected* data muons than an alive one** (depending on how it is counted) (the J/ψ selection or the trigger needs the hit). The data average over run ranges then favours each cell's good ranges. Not an emulation bug; a selection-efficiency effect that the emulation (kill after selection) does not model | second order for the context (0.3%), but **the effect itself is an efficiency difference** worth knowing | 10.4 |
+| 5 | **Muons starting at L3 or with no BPix hit**: 3.8% / 3.4% in 2026 data, 0.3% / 2.1% emulated; 2.5% / 1.8% against 0.3% / 1.2% in 2025; also visible in 2024 | Data also lose L2/L3, which the L1/D1-only code cannot emulate (known, section 9.2) | yes: what the Bmmm mask patch is for | 10.7 |
+| 6 | **The run ranges stop at 8 in 2024 and 2025**, and inside every range the L1 hit efficiency of single runs scatters by 1–2% rms more than statistics (χ²/ndf 5–30) | `--max-ranges 8` is binding; modules come and go from run to run | small for single-layer marginals (they average exactly); matters for correlations between layers once all layers are killed | 10.8 |
+| 7 | **D1 is starved in the small epochs:** up to 54% of the D1 probes of a range take their value from neighbouring ranges (2023_preBPix range 2; 2022_preEE 27–33%) | Range size is set by L1 only (≥ 40 probes per L1 cell); D1 has fewer probes per cell | moderate: D1 in 2022–23 is followed with a delay | 10.9 |
+| 8 | **Mixture test fails for D1 in 2022–2023 data**: W0 has 19–38% wider σ(dxy) than D0 (KS 0.17–0.29) | Few dead D1 cells (342–1578 tracks), at particular places; passes in 2024–26 and in all MC | the "random loss" assumption is not shown for D1 in 2022–23 | 10.10 |
+| 9 | **Route B is skipped in 2022_preEE and 2023_postBPix**; elsewhere it moves σ(dxy) by only 0.02–0.03 in log10 out of 0.2–0.27; the D1 hit errors sit at the 500 µm bound | Too few dead cells for a fit (early epochs); one V per \|η\| bin pinned by non-PD tracks (known, section 9.8) | low (route B is the back-up), but confirms the per-track V redesign | 10.11 |
+| 10 | **Files and logs missing from the copy**: `2022_preEE/noL1_mc` and `2023_preBPix/emu` are empty folders, though the summary says OK; only two logs (2022_preEE steps 1–2) | Partial copy from t3ui07 | only for this review | 10.1 |
+| 11 | **Closure residuals all negative on L1/D1 (−0.04 to −0.15%)** in the early epochs | The floor 0.2 on w_nohit (fixed: default 0 since the mask commit) | small; gone at the next run | 10.3 |
+| 12 | 2022_preEE and 2022_postEE both use `pu_weight_2022` | Probably one 2022 PU profile in the ntuples; the two MC samples differ (Summer22 / Summer22EE), so the maps differ | minor; check the pre/post-EE PU profiles | 10.1 |
+
+### 10.1 What was run, and what came back
+
+![status](docs/hitemu_figs/e08_status.png)
+
+*Per epoch (rows) and step (columns). Green: output present. Yellow: the summary says the step ran, but its files are not in the copy on the Mac. Red: route B could not run (no hit-error fit, see 10.11). Grey: route A never ran, in any epoch, because no trained flows were found.*
+
+| epoch | data runs | run ranges | selected data events | MC events | MC PU weight | L1 ε data / MC | D1+ ε data / MC | D1− ε data / MC |
+|---|---|---|---|---|---|---|---|---|
+| 2022_preEE | 131 (355862–357900) | 3 | 238k | 0.31M | pu_weight_2022 | 0.929 / 0.944 | 0.960 / 0.967 | 0.968 / 0.986 |
+| 2022_postEE | 182 (359569–362760) | 7 | 928k | 1.14M | pu_weight_2022 | 0.915 / 0.940 | 0.957 / 0.970 | 0.963 / 0.986 |
+| 2023_preBPix | 125 (367095–368823) | 6 | 685k | (not copied) | pu_weight_2023 | 0.920 / 0.938 | 0.953 / 0.963 | 0.968 / 0.983 |
+| 2023_postBPix | 43 (369927–370790) | 4 | 364k | 0.30M | pu_weight_2023 | 0.930 / 0.946 | 0.947 / 0.958 | 0.965 / 0.982 |
+| 2024 | 451 (379416–386951) | **8 (cap)** | 3.33M | **3.63M** | pu_weight_2024 | 0.894 / 0.946 | 0.952 / 0.959 | **0.893 / 0.871** |
+| 2025 | 458 (391688–398860) | **8 (cap)** | 3.25M | **3.63M (same)** | pu_weight_2025 | 0.773 / 0.945 | 0.914 / 0.960 | 0.821 / 0.879 |
+| 2026 | 91 (401844–403867) | 7 | 777k | **3.63M (same)** | pu_weight_2026 **(= 2025)** | 0.614 / 0.945 | 0.908 / 0.961 | 0.812 / 0.883 |
+
+*Hit efficiency ε in nominal acceptance, MC averaged on the data illumination (as in the per-cell closure). D1− in 2024 is the only place where data is more efficient than MC (10.5).*
+
+**Route A (#1).** The driver looks for `$RUNS/<epoch>/mu1/task_0/covflow.json` and `…/mu2/…`. Not one epoch had both, so every emulation ran with route B alone (`OK_B`) and the route pages compare *raw* MC covariances with data. Check on t3ui07:
+
+```
+ls /work/manzoni/correct_track_covariance/covflow-runs/run3_epochs_05oct26/*/mu?/task_0/covflow.json
+```
+
+**Missing files (#10).** On t3ui07 they should be in `hitemu/2022_preEE/noL1_mc/`, `hitemu/2023_preBPix/emu/` and `hitemu/logs/` (one log per epoch and step). The 2022_preEE emulation ran without route B (`OK_noB`), so its MC hit-error fit was empty too. Copy them over and the 2023_preBPix entries in the plots below fill in.
+
+### 10.2 One look at all of Run 3
+
+![all runs](docs/hitemu_figs/e01_runs_all_epochs.png)
+
+*Each dot is one data run (area ∝ its probes); black steps: the run-range averages the kill maps use; red dashes: the MC of the epoch (same definition). x axis: cumulative L1 probes, a proxy for luminosity, so each epoch is as wide as its data. Top: L1. Bottom: D1, both sides.*
+
+How to read it:
+
+- **L1** loses efficiency steadily: 0.93 in 2022, 0.89 in 2024, 0.77 in 2025, 0.61 in 2026, down to 0.53 in the last 2026 runs. The MC (red) stays at 0.945 throughout. The kill maps follow the steps; the scatter of single runs around a step is the subject of 10.8.
+- **D1** has one sharp drop, in **2024 at run ~382799**, from 0.96 to 0.905. Before it, data is *above* the MC (0.918): the MC already has the loss that data has only later. This is #2 (section 10.5).
+- 2022–2023 data are within 1–2% of their MC on both surfaces. These epochs need little killing; that is also why they have few dead cells for the no-L1 study (10.10, 10.11).
+
+### 10.3 The closure per epoch
+
+![closure per epoch](docs/hitemu_figs/e02_closure_epochs.png)
+
+*Bars (left axis): hit efficiency ε in acceptance for data (black), MC before (red), MC after emulation (blue), per epoch. Right axis, %: emulated − data as observed (diamonds), and as expected from the kill maps alone, with the floor 0.2 used in this run (orange tick) and with the new default floor 0 (green tick). 2023_preBPix: the emulation output was not copied.*
+
+- Everywhere except 2024 D1−, emulated − data is between −0.04% and −0.30%.
+- **Early epochs (2022–2023):** observed ≈ orange tick. The residual is the old floor 0.2 on w_nohit (section 9.9). Without the floor (green) it nearly vanishes. **Fixed** by the default `--min-weight 0` (#11).
+- **L1 in 2025–2026:** observed (−0.18%, −0.30%) is well below both ticks. The maps alone predict −0.05% / −0.02%. Explained in 10.4 (#4).
+- **D1− in 2024:** −4.2%, predicted almost exactly by the maps (−4.1%): uncorrectable cells. Explained in 10.5 (#2).
+
+### 10.4 Why the L1 closure gets worse with time: a dead cell costs selected muons
+
+The per-cell closure averages each cell over the epoch. Data and emulated MC weigh the run ranges of a cell differently:
+
+- **MC** assigns each event to a run range with the luminosity share of that range (`lumi_fraction`), whatever cell its muons cross. The emulated efficiency of cell c is therefore Σ_r L_r · ε_data(r, c).
+- **Data** is averaged with its own probes, n(r, c) · ε_data(r, c). **If a cell yields fewer selected muons while it is dead, the data average leans towards the ranges where the cell works**, and comes out higher than the MC one.
+
+That is what happens:
+
+![dead cell, fewer muons](docs/hitemu_figs/e09_dead_cell_selection.png)
+
+*Left: for every L1 cell and run range with ≥ 30 probes, the number of selected data muons crossing the cell per unit luminosity, relative to the cell's average over the epoch, against the cell's hit efficiency in that range. A dead cell (ε < 0.2) yields 2–4% fewer muons than an alive one (ε > 0.8). Counting only the cells that switch between alive (ε > 0.85) and dead (ε < 0.25) within the epoch, the drop is 6–9% (L1: 2024 0.91, 2025 0.93, 2026 0.94; D1−: 2024 0.84). Right: emulated − data per epoch and surface (diamonds), against the sum of three expected terms: the kill maps, the floor 0.2, and this range mix (ticks). Within 0.03% everywhere.*
+
+| | 2022_postEE | 2024 | 2025 | 2026 |
+|---|---|---|---|---|
+| L1, emulated − data observed | −0.09% | −0.09% | −0.18% | −0.30% |
+| maps + floor 0.2 | −0.10% | −0.06% | −0.05% | −0.02% |
+| range mix (this effect) | 0.00% | −0.04% | −0.11% | −0.26% |
+| sum | −0.10% | −0.10% | −0.16% | −0.28% |
+
+What it means:
+
+1. **It is not a bug of the emulation.** Per range and cell, the emulated efficiency equals the data one. The residual comes only from averaging over ranges, and grows with how much the cells change over the epoch (most in 2026). This replaces the explanation given in 9.7 (level-1 cells at large |z|).
+2. **The physics behind it is a selection-efficiency effect:** a muon whose L1 hit is lost is 2–9% less likely to end up in the selected J/ψ sample. Plausible causes are the trigger (HLT tracking of the displaced J/ψ), the vertex fit and the displacement cut, whose resolution gets worse without L1. The probe definition itself does not depend on the probed layer.
+3. **The emulation cannot reproduce it**, because it kills hits in already *selected* MC events. The emulated MC therefore has slightly too many muons without an L1 hit in the bad periods. For the context this is a 0.3% effect.
+4. **Fix, if wanted (not implemented):**
+   - Measure the ratio r_s = (selected muons per unit luminosity in a dead cell) / (in an alive cell), as in the left plot.
+   - Kill with the per-crossing efficiency ε_true = r ε_meas / (1 − ε_meas + r ε_meas) instead of the measured ε_meas.
+   - Give the muons whose hit was killed the weight r.
+
+   Then the per-cell yield and the range mix match data by construction. The masks make this more relevant: L2/L3 losses will add to it.
+5. **For R(J/ψ)** this is a data/MC efficiency difference that depends on the run range. It mostly cancels in the ratio when it acts on the J/ψ muons of both channels. It is worth a line in the systematics of the third muon, if that one is reconstructed with the same tracking.
+
+### 10.5 2024 D1−: an MC dead sector that data still had
+
+![2024 D1-](docs/hitemu_figs/e03_2024_D1m_mc_dead.png)
+
+*D1− hit efficiency in (φ, r), 2024. From left: Summer24 MC; data in runs 379416–382795 (ranges 0–1, 37% of 2024); data in runs 382799–386951 (ranges 2–7); the cells flagged uncorrectable in range 0 (ε_data > 3 ε_MC). The MC has a dead sector in the upper left (φ ≈ 2.4–3.1 rad, r ≈ 5–14.8 cm) and a second, smaller one near φ ≈ −2.2. Data loses the same sector only from run ~382799. The MC conditions are a snapshot taken after that run.*
+
+From `inspect_killmaps.py` on the 2024 maps (D1−):
+
+| run range | runs | D1− probes in uncorrectable cells | efficiency left missing |
+|---|---|---|---|
+| 0 | 379416–381152 | 11.3% | −10.7% |
+| 1 | 381164–382795 | 11.1% | −10.4% |
+| 2–7 | 382799–386951 | 0.3–0.5% | −0.01 to −0.07% |
+
+- The emulation can only remove hits (or reweight existing ones). In this sector MC has no hits to give, so in ranges 0–1 the MC muons crossing it keep "no D1 hit" while data has one 90% of the time. Over 2024 this is −4.2% of the D1− efficiency.
+- **Size:** ~37k data probes out of ~6.7M selected 2024 muons, i.e. **~0.6% of the 2024 muons** get the wrong hit pattern on D1− (first disk D2 instead of D1), all with η < −1.5.
+- **Options:**
+  - (a) Accept it and quote it. These are forward muons with a small weight in the analysis.
+  - (b) Give MC muons crossing the sector only the run ranges 2–7. This is a per-track range assignment: their context then matches data's later runs, at the price of a slightly wrong L1 mix for those muons.
+  - (c) Use an MC with early-2024 conditions, if one exists.
+
+  (a) is the default. The same thing happens nowhere else: 2025–2026 have the sector dead in data as well (uncorrectable < 0.6% of D1− probes).
+
+### 10.6 One MC sample for 2024, 2025 and 2026
+
+Three facts from the outputs:
+
+1. The emulation reads **3,627,107 MC events in 2024, 2025 and 2026**. It is the same sample (Summer24).
+2. The MC maps of **2025 and 2026 are bit-identical** (same probes, same weighted hits; md5 of the L1 map `20294a69` in both), although they use `pu_weight_2025` and `pu_weight_2026`. The no-L1 MC outputs (`hiterrors_mc_2025.json` / `_2026.json`, the PDFs) are byte-identical too. **So `pu_weight_2026` equals `pu_weight_2025` event by event.** 2024 differs only through its own PU weight (7.01M against 6.98M weighted L1 probes).
+3. 2022_preEE and 2022_postEE both use `pu_weight_2022`, but with different MC samples.
+
+Consequences:
+
+- The 2026 emulation uses the 2025 pile-up profile. The hit efficiency depends little on pile-up, but the context (pt, η of the muons) and the probe counts do a little. **Is a 2026 PU profile available?** If not, this is deliberate and fine for now.
+- The Summer24 conditions are a 2024 snapshot. In 2025–2026 everything the data lost later is handled by the kill maps. What the MC lost *and data had* is uncorrectable, which only bites in early 2024 (10.5).
+
+### 10.7 The context per epoch: what L1 and D1 alone cannot reproduce
+
+![context](docs/hitemu_figs/e04_context_epochs.png)
+
+*Fraction of muons per epoch: with no BPix hit, starting at L2, starting at L3, and with ≤ 3 pixel hits. Data (black), MC before (red dashes), MC emulated with L1/D1 kill only (blue).*
+
+- **L2 start** is reproduced, and even overshoots in 2025–26 (37.0% against 31.6% in 2026). Those are the muons that in data also lost L2 and start at L3.
+- **L3 start**: data grows from 0.4% (2022–23) to 0.7% (2024), 2.5% (2025) and 3.8% (2026). The emulation stays at the MC's 0.3%.
+- **No BPix hit**: data 0.5% → 3.4%, emulated 0.4% → 2.1%.
+- **≤ 3 pixel hits**: data 23% → 47%, emulated 20% → 44%.
+
+This is the missing L2/L3 (and D2) emulation of section 9.2, now seen in every epoch, growing with time. It is the reason for the Bmmm per-layer mask patch. Nothing in these results argues against the patch; 2024 and 2025 make it more necessary.
+
+### 10.8 Run ranges: the cap of 8, and the scatter of single runs
+
+| epoch | ranges | χ²/ndf of single runs around their range (L1) | extra run-to-run spread of ε_L1 inside a range (rms) |
+|---|---|---|---|
+| 2022_preEE | 3 | 5.1 | 0.7–0.9% |
+| 2022_postEE | 7 | 8.1 | 0.3–1.0% |
+| 2023_preBPix | 6 | 12.8 | 0.5–1.2% |
+| 2023_postBPix | 4 | 18.5 | 0.3–1.0% |
+| 2024 | **8 = cap** | 21.2 | 0.8–1.6% |
+| 2025 | **8 = cap** | 29.6 | 0.5–2.3% |
+| 2026 | 7 | 16.9 | 0.2–2.3% |
+
+*"Extra" = rms of the per-run L1 hit efficiency inside a range after subtracting the statistical part (runs with ≥ 200 probes).*
+
+- Single runs scatter well beyond statistics: up to 25 standard deviations (2025 run 394677: 0.807 against 0.863 for its range). Modules come and go from run to run. 2025 range 2 alone holds 142 runs and 34% of the year.
+- **For single-layer quantities this is harmless.** The average over runs of the per-run efficiency is what the emulation reproduces, and it is linear.
+- **It is not harmless for correlations between layers.** P(L1 and L2 both lost) averaged over runs is not the product of the averages when both vary together. With the masks every layer is killed independently in each range, so the ranges should be finer.
+- **Action:** raise `--max-ranges` to 16–20 for 2024–2025 at the next run. It costs nothing in time; the minimum of 40 probes per L1 cell still applies. Per-run ranges are the limit for the large epochs.
+
+### 10.9 Statistics per range: D1 left short in the small epochs
+
+![fallback](docs/hitemu_figs/e05_fallback_vs_probes.png)
+
+*Per run range: fraction of the data probes whose cell efficiency is not measured in the cell itself (fallback level 1, neighbouring ranges, or level 2), against the probes of the range. Left L1, right D1+ (▲) and D1− (▼). Dotted: 30 probes × number of cells.*
+
+- The range size is chosen on **L1 only** (at least 40 probes per L1 cell). Each D1 side has a third of L1's cells (960 against 3072) but only 15–18% of its probes.
+- In the large epochs this is fine (D1 fallback < 3%). In 2022_preEE (27–33%), 2023_preBPix range 2 (40–54%) and 2023_postBPix range 0 (23%), a large part of D1 borrows its value from neighbouring ranges.
+- **Action (small):** also require a minimum per D1 cell when splitting, or use coarser D1 cells (e.g. 24 in φ) in the small epochs. With the masks this applies to every surface: the split rule should look at all surfaces.
+
+### 10.10 The mixture test per epoch
+
+![mixture](docs/hitemu_figs/e06_mixture_epochs.png)
+
+*Median log10 σ(dxy) of muons without the hit in a working cell (W0, reweighted) minus that of muons in a dead cell (D0), per epoch. Black: data; red: MC. Labels: number of D0 tracks. Green band: |shift| < 0.02 (5% in σ).*
+
+- **L1** passes in every epoch and in MC (|shift| ≤ 0.033 on every parameter, KS ≤ 0.08).
+- **D1 in 2022–2023 data fails:** +0.075 to +0.139 (σ 19–38% wider for W0), KS 0.17–0.29.
+  - There are few D0 tracks (342–1578), all in a handful of dead cells.
+  - In 2024–2026 data (19k–75k D0 tracks) and in all MC it passes.
+  - Most likely it is the location of those few dead cells, not a property of the hit loss.
+- **Consequence:** for D1 in 2022–2023 the "missing hit = dead-cell loss" assumption is not shown. D1 kills there are ~3% of the D1 hits, so it matters little.
+
+### 10.11 Routes per epoch
+
+![routes](docs/hitemu_figs/e07_routeB_epochs.png)
+
+*Left and middle: for MC muons that lost L1 (D1), median log10 σ minus that of data muons in dead cells, before (open) and after route B (full), for dxy (blue) and dsz (orange). Right: the L1 hit error σ_v fitted per \|η\| bin on data (lines) and Summer24 MC (red), and the value actually used for \|η\| < 1 (crosses), which is a data fit scaled by an MC/data ratio taken from the higher bins.*
+
+- **Without flows these numbers are not a closure test.** "MC before" is the raw MC covariance, which covflow has not corrected yet; −0.23 to −0.27 in log10 is mostly the MC/data covariance difference that covflow exists to correct. Route A (primary) and "route B final" (B, then covflow) both need the flows (#1).
+- **Route B moves dxy by only 0.02–0.03** (out of 0.2–0.27) in every epoch. It moves dsz a lot in 2025–26 (−0.21 → +0.03), even past zero.
+- The **transferred σ_v for \|η\| < 1 is 18–23 µm in 2022, 2025 and 2026**, smaller than σ_u and than any fitted bin. The MC/data ratio (0.39–0.52) comes from bins where the data fit is pushed up by the pinned V. This is not physical.
+- **D1 hit errors sit at the 500 µm bound** for \|η\| > 1.5 in 2024–26 (and in 2022–23 data). Removing a D1 hit with that error changes nothing: route B on D1 is effectively off.
+- **"Inflated"** (tracks whose own V had to be enlarged to stay positive-definite) grows from 11% (2024) to 23% (2022_postEE) and 37–40% (2025–26).
+- **2022_preEE and 2023_postBPix:** no fit (2022_preEE: 0–16 D0 tracks per \|η\| bin on L1, at most 162 on D1). `EXTRA_HITERR` could borrow 2022_postEE / 2023_preBPix, but see the next point.
+- All of this confirms section 9.8: one V per \|η\| bin cannot work. Route B needs the per-track V = k · H C Hᵀ before it is worth tuning further. Route A first.
+
+### 10.12 What to do, in order
+
+1. **Get the flows found** (#1): check the `RUNS` tag in `run_hitemu.csh` and that `covflow.json` exists for mu1 and mu2 in every epoch. Then rerun step 4 only. Example for one epoch, the rest as in the driver:
+   ```
+   python emulate_hit_loss.py --epoch 2024 --branch vx=pv_x --branch vy=pv_y --z0-from dz_pv \
+       --killmaps hitemu/2024/killmaps/killmaps_2024 --route A B \
+       --hit-errors hitemu/2024/noL1_mc/hiterrors_mc_2024.json hitemu/2024/noL1_data/hiterrors_data_2024.json \
+       --flow-dir "$RUNS/@epoch@/@mu@/task_0" --min-weight 0 --out hitemu/2024/emu
+   ```
+   `--min-weight 0` re-finalises the stored maps without the floor (#11), so step 1 need not be redone.
+2. **Copy the missing files and logs** (#10), so 2023_preBPix can be checked as well.
+3. **Confirm the MC per epoch** (#3, #12): is Summer24 meant for 2025 and 2026, and is a 2026 PU profile coming?
+4. **2024 D1−** (#2): decide between accept-and-quote (default) and range assignment by sector (10.5).
+5. **Bmmm per-layer masks** (#5): nothing here argues against them; 10.7 shows they are needed in 2024 and 2025 too. After the cmsenv test and the merge, the next production gives all ten surfaces.
+6. **At the next full run** (after the masks):
+   - `--max-ranges 16` (#6);
+   - a split rule that looks at all surfaces (#7);
+   - optionally the selection-loss weight of 10.4 (#4).
+7. **Route B per-track V** (#9), only if route A turns out insufficient.
+
+---
+
+## 11. Approximations, open items, speed
 
 1. **No per-layer hit mask** (section 9.2). After a kill, the next crossed layer is assumed valid, and L2–L4 / D2–D3 cannot be emulated. This is the dominant residual in 2026. **Fix written** (Bmmm branch `pix-layer-masks`, October 2026), as new muon branches from `bestTrack()`:
    - `{mu}_pix_valid_mask`: layers with a valid hit;
@@ -868,12 +1102,15 @@ The emulated tree was checked entry by entry, for every muon:
 7. **Route B hit errors** are one (σ_u, σ_v) per \|η\| bin. On 2026 data and MC this does not close beyond \|η\| ≈ 0.5 (section 9.8): V is pinned by the positive-definiteness of the widest tracks. To be replaced by a per-track relative error V = k · H C Hᵀ.
 8. **Route A** uses the flows as trained on non-emulated MC: f_MC is evaluated at the original context, where MC is plentiful.
 9. **Offline only.** The smearing δ ~ N(0, C′ − C) is applied here only to the beam-spot IP-significance check. Production needs the kill step, the chosen route and the smearing in Bmmm before the vertex fits; the functions in `hitemu.py` are plain numpy.
-10. **Early epochs** (2022–2023) have few dead cells, so the hit-error fits may be empty. `EXTRA_HITERR` in `run_hitemu.csh` can point to a later epoch's fits.
+10. **Early epochs** (2022–2023) have few dead cells, so the hit-error fits may be empty (it happened for 2022_preEE and 2023_postBPix, section 10.11). `EXTRA_HITERR` in `run_hitemu.csh` can point to a neighbouring epoch's fits.
 11. **Speed:** solved (section 9.7). The full year takes 5.5 min without routes, dominated by reading. `--closure-only` is still there for even faster iterations.
+12. **Selection loss in dead cells** (section 10.4). A muon that loses its L1 hit is 2–9% less likely to be selected in data. The emulation kills hits after the selection, so it cannot reproduce this. It shows up as an L1 closure residual of up to −0.3% (2026). Possible fix: kill with the per-crossing efficiency and weight killed muons by the measured ratio r.
+13. **MC conditions are one snapshot per MC sample** (section 10.5). What the MC lost before data did is uncorrectable: 2024 D1−, runs before ~382799, ~0.6% of the 2024 muons.
+14. **Run ranges** (sections 10.8–10.9): the cap of 8 is binding in 2024–2025, and the split rule looks only at L1. Raise `--max-ranges`, and split on all surfaces once the masks are in.
 
 ---
 
-## 11. Reference
+## 12. Reference
 
 ### Files (repository root)
 
