@@ -68,6 +68,11 @@ def parse_args():
                    help='cells where eps_data/eps_MC exceeds this cannot be '
                         'emulated (MC has (almost) no hits there) and are left '
                         'unchanged and listed (default %(default)s)')
+    p.add_argument('--fallback', choices=('mcshape', 'average'), default='mcshape',
+                   help='data efficiency of cells with too few probes in the whole epoch: '
+                        'mcshape = eps_MC of the cell x one data/MC factor per range '
+                        '(default), average = data surface average (old behaviour, '
+                        'biased low where MC has dead cells)')
     p.add_argument('--lumi-csv', default=None,
                    help='brilcalc csv with recorded luminosity per run')
     p.add_argument('--out', default=None, help='default: killmaps_<epoch>')
@@ -224,7 +229,8 @@ def main():
                     m['num'], m['den'], m['num2'], m['den2'], meta).finalise(a.min_cell,
                                                                             a.max_weight,
                                                                             a.prior,
-                                                                            a.min_weight)
+                                                                            a.min_weight,
+                                                                            a.fallback)
     km.save(stem)
 
     # --------------------------------------------------------------- report
@@ -263,8 +269,10 @@ def report_lines(km, runs, tab, segs, a):
                     tab[i:j, 4].sum() / max(tab[i:j, 3].sum(), 1), mean_pk,
                     '/'.join(map(str, cnt))))
     L += ['', 'kill L1 = average P_kill over the data probes of the range',
-          'fallback: 0 range+cell, 1 cell over the nearest ranges (scaled), 2 range '
-          'surface average, 3 none (min %g probes)' % km.min_cell, '']
+          'fallback: 0 range+cell, 1 cell over the nearest ranges (scaled), 2 %s, '
+          '3 none (min %g probes)'
+          % ('eps_MC of the cell x data/MC factor of the range' if km.fallback == 'mcshape'
+             else 'range surface average', km.min_cell), '']
     for s in km.surfaces:
         xe, ye = km.edges[s]
         acc = H.in_acceptance(s, 0.5 * (xe[1:] + xe[:-1]))
@@ -274,6 +282,15 @@ def report_lines(km, runs, tab, segs, a):
         dd = km.d_den[s]
         lost = float(sum(km.lumi[k] * dd[k][unc[k]].sum() / max(dd[k].sum(), 1)
                          for k in range(len(km.lumi))))
+        dacc = dd[:, acc]
+        lv = km.level_d[s][:, acc]
+        bylev = [float(dacc[lv == k].sum() / max(dacc.sum(), 1)) for k in (0, 1, 2, 3)]
+        with np.errstate(divide='ignore', invalid='ignore'):
+            emeas = np.where(dd > 0, km.d_num[s] / dd, 0.0)
+        miss = float((dd * (emeas - np.nan_to_num(km.eps_m[s])[None]))[unc].sum() / max(dd.sum(), 1))
+        L.append('%-4s data probes by fallback level 0/1/2/3: %s'
+                 % (s, ' '.join('%.3f' % x for x in bylev)))
+        L.append('     efficiency left missing in uncorrectable cells (emulated - data): %+.4f' % -miss)
         L.append('%-4s cells in acceptance with eps_data > eps_MC (reweighted): %.3f, '
                  'largest weight %.3f' % (s, frac, float(w.max())))
         L.append('     data probes in UNCORRECTABLE cells (eps_data/eps_MC > %.2f, MC '

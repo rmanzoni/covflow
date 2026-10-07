@@ -86,6 +86,8 @@ python build_kill_maps.py   --epoch 2026 --max-events 300000 --out test_km
 python inspect_killmaps.py  test_km/killmaps_2026                      # where the probes sit, what stays missing
 python noL1_data_study.py   --epoch 2026 --killmaps test_km/killmaps_2026 --max-events 300000 --split-test --out test_nol1
 python emulate_hit_loss.py  --epoch 2026 --killmaps test_km/killmaps_2026 --max-events 300000 --out test_emu
+# hit pattern only (no covariance branches, much faster): for iterating on kill maps and context closure
+python emulate_hit_loss.py  --epoch 2026 --killmaps test_km/killmaps_2026 --max-events 300000 --closure-only --out test_emu_co
 
 # everything, every epoch, under screen (edit RUNS at the top of the script first: the trained-flow production)
 screen -S hitemu
@@ -142,10 +144,12 @@ A cell needs at least 30 probes (`--min-cell`) for its own efficiency to be trus
 |---|---|---|
 | 0 | the cell itself, in this run range | ≥ 30 probes |
 | 1 | the same cell summed over the neighbouring run ranges (the narrowest window with ≥ 30 probes), scaled by (this range's surface average) / (the window's surface average) | sparse in this range, but not over the year |
-| 2 | the surface average of this run range | sparse everywhere |
+| 2 | **ε_MC of the same cell × one data/MC factor per range** (the factor makes the data efficiency summed over all level-2 cells equal to the measured one) | sparse everywhere |
 | 3 | nothing: the cell is left unchanged (P_kill = 0) | no data probe at all |
 
 The same rule applies to MC: own cell if ≥ 30 effective probes, else the MC surface average.
+
+Level 2 was the *data surface average* until October 2026. The 2026 test showed that this is biased whenever MC has dead regions (section 9.3): the average already contains data's dead regions, and MC's dead regions then stay dead on top. Level 2 now keeps MC's live/dead pattern and only rescales it. `--fallback average` brings back the old behaviour, for comparison.
 
 How many cells fall back depends almost only on statistics and on z: the luminous region is ±4 cm, so L1 cells at \|z\| > 15 cm are rarely crossed by anybody.
 
@@ -207,7 +211,12 @@ For every selected MC event, `emulate_hit_loss.py` does the following.
 
 Two checks, both in `emu_<epoch>.pdf` and in the printed summary.
 
-**Per-cell closure.** For each L1 / D1± cell: data ε against emulated-MC ε, averaged with the data probes as weights. By construction emulated = data, except in uncorrectable cells (MC stays lower) and through the fallback approximations.
+**Per-cell closure.** For each L1 / D1± cell: the *measured* data efficiency (raw hits / probes, summed over run ranges) against the emulated-MC efficiency, both averaged with the data probes of the cell as weights. Two columns are printed:
+
+- **all cells**;
+- **measured cells only** (≥ 30 data probes), where the per-cell comparison is meaningful.
+
+By construction emulated = data, except in uncorrectable cells (MC stays lower) and through the fallback approximations. (The first version compared with the kill-map values instead of the raw counts, which in sparse cells are the fallback values themselves. That hid where the problem was; see section 9.3.)
 
 ![s02](docs/hitemu_figs/s02_emu_L1closure.png)
 
@@ -226,7 +235,7 @@ Each is compared for data, MC before and MC emulated, and summarised by the tota
 
 ![s03](docs/hitemu_figs/s03_emu_context.png)
 
-*Synthetic example of the context page: first BPix layer (top) and first FPix disk (bottom) per |η| bin. Black data, grey MC before, orange MC emulated. On the real 2026 test this page shows the L3 deficit of section 9.*
+*Synthetic example of the context page: first BPix layer (top) and first FPix disk (bottom) per |η| bin. Black data, grey MC before, orange MC emulated. The page now has a third row with the number of pixel hits. The real 2026 page is in section 9.5.*
 
 ---
 
@@ -354,7 +363,7 @@ Routes A and B were not requested, so this test is about steps 1–3 only.
 
 ![test results](docs/hitemu_figs/f08_test_results.png)
 
-*Left: per-cell closure; the number is emulated − data. Middle: fraction of muons by first BPix layer (log scale; numbers in %). Right: how much each category contributes to the total variation of the first-BPix-layer distribution, before and after emulation.*
+*Left: per-cell closure as printed by the first version of the script (compared with the kill-map values; superseded, see 9.3). Middle: fraction of muons by first BPix layer (log scale; numbers in %). Right: how much each category contributes to the total variation of the first-BPix-layer distribution, before and after emulation.*
 
 ### 9.1 The log, line by line
 
@@ -365,14 +374,15 @@ Routes A and B were not requested, so this test is about steps 1–3 only.
 | `kill L1 0.3298` | average P_kill over data probes | 1 − 0.637/0.945 = 0.326 ✓ |
 | `cells by fallback level 0/1/2/3 (L1): 1156/0/1276/640` | 38% of L1 cells measured, 42% surface average, 21% no probe | the statistics of 6% of the year; matches the prediction of section 3.3. Level 1 is 0 because there is only one range. |
 | `L1 ... eps_data > eps_MC: 0.021 ... UNCORRECTABLE: 0.0002` | 2% of L1 cells are slightly better in data (fluctuations of sparse cells); uncorrectable negligible | ✓ |
-| `D1+ ... UNCORRECTABLE 0.0308`, `D1- ... 0.0337` | 3% of D1 data probes are in cells where ε_data > 1.5·ε_MC | **real, mostly**: Summer24 has partly dead D1 regions that are alive in 2026 data (full-2026 maps: 3.7% / 1.6%, figure in section 3.4) |
+| `D1+ ... UNCORRECTABLE 0.0308`, `D1- ... 0.0337` | 3% of D1 data probes are in cells where ε_data > 1.5·ε_MC | **mostly a fallback artefact in this test**: 89% of the D1 data probes sit in level-2 cells, whose ε_data was the surface average. Compared with a real MC dead cell, that average looks "much better than MC". With the new fallback it drops to 0.0% (D1+) and 0.2% (D1−). On the full year, real uncorrectable cells exist too (3.7% / 1.6% of the probes, section 3.4). |
 | `selected MC events 107619; event weight ... mean 1.0016, min 0.083, max 1.713, 10.8% != 1` | weights come only from cells where data beats MC | **mild** (compare with ~10³ for plain reweighting): the method does what it was built for |
 | `L1 hits removed: 0.3386`, `D1 hits removed: 0.0802` | fraction of MC hits removed, on MC illumination | ✓ (differs slightly from 0.33 because MC and data illuminate the cells differently) |
-| `muons left with no pixel hit: 0.0010, with <= 2: 0.0925` | after the emulation | compare with data on the "pixel hits" panel of the context page. No-hit muons (0.1%) are negligible. |
+| `muons left with no pixel hit: 0.0010, with <= 2: 0.0925` | after the emulation | the test PDF has no pixel-hit panel yet (now added). No-hit muons (0.1%) are negligible; the ≤ 2 comparison with data needs the next run. |
 | `PER-CELL CLOSURE L1 data 0.6351 / before 0.9449 / emulated 0.6330` | the kill works: 0.945 → 0.633 for a target of 0.635 | **✓ closes** to −0.002 |
-| `D1+ 0.9169 / 0.9656 / 0.9059`, `D1- 0.8247 / 0.8844 / 0.7973` | emulated below data by 0.011 (D1+) and 0.027 (D1−) | D1+ = exactly the 1.1% the full maps predict from uncorrectable cells. **D1− is 7× larger than predicted (0.4%) — not yet understood**, see 9.3. |
+| `D1+ 0.9169 / 0.9656 / 0.9059`, `D1- 0.8247 / 0.8844 / 0.7973` | emulated below data by 0.011 (D1+) and 0.027 (D1−) | **understood and fixed** (9.3): the old level-2 fallback double-counts dead regions. With the new fallback, the expected closure from the same maps is +0.001 on both disks. |
 | `CONTEXT ... first BPix x first FPix: 0.3150 → 0.0634; pixel hits 0.2304 → 0.0499` | the misplaced fraction falls by 5× | good, but 6% is still misplaced. Next line says where. |
 | `fraction with first BPix layer 0/1/2/3/4` | the key line, see 9.2 | **the emulation misses data's L2/L3 inefficiency** |
+| (json) first FPix disk 0/1/2/3: data `0.696 0.271 0.031 0.0026`, emulated `0.733 0.237 0.030 0.0002` | the same on the disks | muons starting at D3 are 13× too rare in the emulated MC: D2 is also lost in data (forward bin of the context page, 9.5) |
 
 ### 9.2 The main finding: data also lose L2 (and L3), the emulation cannot
 
@@ -402,15 +412,48 @@ Both are solved by the per-layer hit mask `{mu}_pix_valid_mask` (bits 0–3 BPix
 
 **This is the motivation for the Bmmm patch.**
 
-### 9.3 Open point: the D1− closure
+### 9.3 The D1 closure: a fallback artefact, now fixed
 
-D1+ closes as predicted (−0.011 against the −0.011 that uncorrectable cells must leave). D1− should leave −0.004 but shows −0.027. Possible reasons:
+**Diagnosis.** On the test maps, `inspect_killmaps.py` shows where the D1 data probes sit:
 
-- **(a)** the first 13 runs have D1− conditions different from the year average;
-- **(b)** the kill-map D1 cells (48 × 20) are coarser than the efficiency-map cells (96 × 30): a cell that is half dead in MC and fully alive in data then has ε_data/ε_MC ≈ 2 and becomes uncorrectable as a whole;
-- **(c)** fallback-level-2 cells, where a data *average* is compared with a real (dead) MC cell.
+| surface | data probes in level-0 cells | in level-2 cells (surface average) |
+|---|---|---|
+| L1 | 86.5% | 13.5% |
+| D1+ | 10.4% | **89.6%** |
+| D1− | 11.3% | **88.7%** |
 
-`python inspect_killmaps.py test_km/killmaps_2026` separates them. The column `[lev0 data]` gives the uncorrectable probes measured in the cell itself (reasons a/b); the rest are fallback (reason c). The column `missing eff` should reproduce the −0.027. If (b) dominates, rerun with `--nbins-phi 96 --nbins-r 30`. Raising `--max-weight` to 3 roughly halves what is left missing (section 3.4).
+The D1 statistics of 300k events are ~14 probes per cell, so almost every D1 cell used the old level-2 value, the data surface average. That average **already contains** data's dead regions. Giving it to every sparse cell does two things:
+
+- in MC-alive cells it removes hits down to the average (ε ≈ 0.81 on D1− instead of ≈ 0.92);
+- in MC's dead sector nothing can be removed, because MC has no hits there.
+
+So the dead sector is counted twice and the emulated MC ends up below data. The figure shows this on the real test maps:
+
+![fallback fix](docs/hitemu_figs/f14_fallback_fix.png)
+
+*Top, D1−:*
+
+- *1st panel: MC efficiency per cell, with a dead sector on the left;*
+- *2nd panel: old fallback, flat;*
+- *3rd panel: new fallback, the MC pattern scaled by one factor (0.918);*
+- *4th panel: raw data counts, which show the same dead sector in data.*
+
+*Bottom: expected per-cell closure computed from the test maps (each MC cell's efficiency after kill or reweighting, on the data illumination, against raw data). D1+: −0.005 → +0.001; D1−: −0.014 → +0.001.*
+
+Two more things made the printed numbers (−0.011, −0.027) look worse than these (−0.005, −0.014):
+
+- the printed "data" was the kill-map value, i.e. the fallback itself, not the raw counts;
+- the old fallback created 1.5–2% spurious uncorrectable D1 cells: an average compared with a dead MC cell.
+
+Both are fixed in the code:
+
+- level 2 = MC shape × factor (`--fallback mcshape`, the default);
+- the closure is computed against raw data counts, with a separate "measured cells only" column;
+- the build log prints the probes per fallback level and the efficiency left missing.
+
+The earlier hypotheses for D1− (different conditions in the first runs, cells too coarse) are not needed: the dead sector is present in both data and MC (top-right panel) and matches.
+
+**No new kill maps are needed to check this:** the npz holds the raw counts and the fallback is applied when the maps are loaded. Rerunning `emulate_hit_loss.py` on the existing `test_km` maps uses the new fallback automatically.
 
 ### 9.4 Speed
 
@@ -421,14 +464,29 @@ D1+ closes as predicted (−0.011 against the −0.011 that uncorrectable cells 
 | emulation, data | 3.9k ev/s | ~21 min |
 | **emulation, MC** | **0.5k ev/s** | **~5.5 h** |
 
-The emulation MC pass is slow because of the per-cell histograms (`np.add.at`), which can be replaced by `np.bincount` (much faster), and because the crossings are computed twice. This does not affect the results; it should be fixed before running all epochs.
+On the synthetic samples the same code runs at ~30k events/s, so the 511 events/s is specific to the real ntuples. The emulation reads ~35 more branches than the kill maps: the 15 covariance elements per muon and the beam-spot IP. Reading them is the most likely cost, but this cannot be checked from here. Changes in this version:
 
-### 9.5 What to check in the two PDFs of the test
+- the script now prints `TIMING (s): data pass ... (reading ...), MC pass ... (reading ...)`: the next run tells whether reading or computing dominates;
+- with `--max-events` the reading step is now limited to the requested events (before, a whole 200 MB step was read and decompressed, then cut);
+- `np.add.at` is replaced by `np.bincount` everywhere;
+- **`--closure-only`** skips the covariance and beam-spot branches and all route/target histograms. It is meant for iterating on the kill maps and the context closure, which is everything this test was about.
 
-- **`killmaps_2026.pdf`, D1± summary page:** do the grey (uncorrectable) cells sit where ε_MC is dark? If yes, they are real MC-dead regions (reasons a/b of 9.3). If they are at the r edges, or where ε_MC is fine, they are fallback artefacts (reason c).
-- **`killmaps_2026.pdf`, L1 P_kill:** structure in \|z\| < 10 cm, flat outside (level 2) — expected with 13 runs.
-- **`emu_2026.pdf`, context page:** in every \|η\| bin with BPix coverage, the black (data) point at first layer = 3 should sit about 10× above the orange (emulated) one. That is 9.2 seen per bin.
-- **`emu_2026.pdf`, pixel-hits panel:** does data also have ~9% of muons with ≤ 2 pixel hits? If data has fewer, part of the emulated low-hit muons would not have been reconstructed (approximation 3 in section 10).
+### 9.5 What the two PDFs of the test show
+
+**`killmaps_2026.pdf`**
+
+- **Run-range page:** the 13 runs scatter around ε(L1) = 0.637 and ε(D1) = 0.862 within their errors. One range is right for this slice.
+- **L1 ε_data and P_kill:** structure (dead modules) only in \|z\| < 10 cm; flat outside, where the cells are level 2 (as predicted in 3.3).
+- **D1± ε_data:** almost flat. The cells are level 2, which is the cause of 9.3.
+- **D1± ε_MC:** a dead sector in D1− (φ ≈ 2.4–3.4 rad, the full r range) and scattered dead cells in D1+. The raw data counts show the same D1− sector dead in data (figure in 9.3).
+
+**`emu_2026.pdf`, context page (real):**
+
+![test context](docs/hitemu_figs/r01_test_context.png)
+
+*Top row: in every |η| bin with barrel coverage, data (black) starting at L3 or L4 is ~10× above the emulated MC (orange), while L1 and L2 agree. This is 9.2 seen bin by bin. Bottom row, last bin (2.0 < |η| < 2.6): data starting at D3 is ~15× above the emulation, and data with no FPix hit at all is ~10× above. Same mechanism on the disks: after a D1 kill the emulation assumes D2 is there.*
+
+**Not in the test PDF:** a pixel-hit panel (added now, third row of the context page), the routes (not requested) and the mixture test (`noL1_data_study.py` was not run).
 
 ---
 
@@ -438,13 +496,13 @@ The emulation MC pass is slow because of the per-cell histograms (`np.add.at`), 
 2. **Two hits on one layer** (module overlaps) count as one when killed: for those tracks n_pix stays 1 too high.
 3. **Tracks left with ≤ 2 pixel hits are kept**; the reconstruction would have lost some of them (0.1% have none).
 4. **MC share per run range** = share of selected data events, which includes trigger and selection efficiency. `--lumi-csv` takes the brilcalc recorded luminosity instead.
-5. **Uncorrectable cells** (MC dead where data works) cannot be emulated by removing hits. With the default cap 1.5 they leave ~1% of D1+ efficiency missing in 2026; cap 3 halves it at the price of weights up to 3.
-6. **Fallback cells** carry the surface average (level 2), so per-cell structure is lost there. They hold few probes by definition, but with the full sample most of them become level 1 (same cell, neighbouring months).
+5. **Uncorrectable cells** (MC dead where data works) cannot be emulated by removing hits. With the default cap 1.5 they leave ~1% of D1+ efficiency missing in 2026 (full-year maps); cap 3 halves it at the price of weights up to 3.
+6. **Fallback cells** (level 2) take MC's pattern scaled to the data total: data-only dead modules in a sparse cell are spread over the surface. They hold few probes by definition, and with the full sample most of them become level 1 (same cell, neighbouring months).
 7. **Route B hit errors** are one (σ_u, σ_v) per \|η\| bin. Tracks whose own error is larger are redone with a larger V (reported as `inflated`).
 8. **Route A** uses the flows as trained on non-emulated MC: f_MC is evaluated at the original context, where MC is plentiful.
 9. **Offline only.** The smearing δ ~ N(0, C′ − C) is applied here only to the beam-spot IP-significance check. Production needs the kill step, the chosen route and the smearing in Bmmm before the vertex fits; the functions in `hitemu.py` are plain numpy.
 10. **Early epochs** (2022–2023) have few dead cells, so the hit-error fits may be empty. `EXTRA_HITERR` in `run_hitemu.csh` can point to a later epoch's fits.
-11. **Speed** (section 9.4): the MC emulation pass needs the bincount rewrite before an all-epoch run.
+11. **Speed** (section 9.4): the 511 events/s MC pass on the real ntuples is not understood yet. The `TIMING` line of the next run will show whether reading dominates. `--closure-only` avoids the covariance branches when only the hit pattern matters.
 
 ---
 
@@ -474,11 +532,14 @@ The emulation MC pass is slow because of the per-cell histograms (`np.add.at`), 
 | | `--min-weight` | 0.2 | floor of w_nohit |
 | | `--nbins-phi`, `--nbins-r` | 48, 20 | cell granularity (L1 z is fixed to the ROC pitch) |
 | | `--lumi-csv` | – | brilcalc csv for the MC shares |
+| | `--fallback` | mcshape | level-2 data efficiency: `mcshape` (ε_MC of the cell × factor) or `average` (old) |
 | emulate_hit_loss | `--route` | none | `A`, `B` or both |
 | | `--flow-dir` | – | trained flows, with `@epoch@` / `@mu@` placeholders |
 | | `--hit-errors` | – | one or more `hiterrors_*.json` (first with a fit wins, per surface) |
 | | `--eps-dead` | 0.4 | ε_data below which a cell counts as dead (D0 target) |
 | | `--write-tree` | off | write the emulated MC tree (route B) for retraining |
+| | `--closure-only` | off | only hit killing and closure; no covariance / beam-spot branches, no routes (fast) |
+| | `--fallback` | as stored | re-finalise the kill maps with another level-2 fallback (maps from before Oct 2026: `mcshape`) |
 | all | `--max-events` | all | read only the first N events (= first runs) |
 
 ### Outputs per epoch (`run_hitemu.csh`)

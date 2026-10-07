@@ -93,6 +93,15 @@ def parse_args():
     p.add_argument('--write-tree', action='store_true',
                    help='write the emulated MC (needs route B): context and '
                         'covariance branches replaced, see the output json')
+    p.add_argument('--closure-only', action='store_true',
+                   help='only the hit killing and its closure (per cell, context): '
+                        'the covariance and beamspot branches are not read and no '
+                        'route / target histograms are made. Much faster; not '
+                        'compatible with --route')
+    p.add_argument('--fallback', choices=('mcshape', 'average'), default=None,
+                   help='re-finalise the kill maps with this level-2 fallback '
+                        '(default: the one stored in the maps; maps written before '
+                        'Oct 2026 get mcshape)')
     p.add_argument('--out', default=None, help='default: emu_<epoch>')
     p.add_argument('--png', action='store_true')
     a = p.parse_args()
@@ -100,6 +109,8 @@ def parse_args():
         die('--route A needs --flow-dir')
     if 'B' in a.route and not a.hit_errors:
         die('--route B needs --hit-errors')
+    if a.closure_only and (a.route or a.write_tree):
+        die('--closure-only cannot be combined with --route / --write-tree')
     if a.write_tree and 'B' not in a.route:
         die('--write-tree writes route B,raw covariances: add --route B')
     return a
@@ -116,7 +127,7 @@ class RwVar:
     def fill(self, cell, x, w):
         ik = np.searchsorted(self.edges, x, 'right') - 1
         ok = (cell >= 0) & np.isfinite(x) & np.isfinite(w) & (ik >= 0) & (ik < len(self.edges) - 1)
-        np.add.at(self.h, (cell[ok], ik[ok]), w[ok])
+        H.hist_add(self.h, (cell[ok], ik[ok]), w[ok])
 
     def projected(self, target=None):
         h = self.h
@@ -142,9 +153,31 @@ class Ctx:
         ip = np.searchsorted(NP_EDGES, npix, 'right') - 1
         ok = (ie >= 0) & (ie < len(CTX_ETA) - 1) & np.isfinite(w)
         okj = ok & (ib >= 0) & (ib < len(FB_EDGES) - 1) & (ic >= 0) & (ic < len(FE_EDGES) - 1)
-        np.add.at(self.joint, (ie[okj], ib[okj], ic[okj]), w[okj])
+        H.hist_add(self.joint, (ie[okj], ib[okj], ic[okj]), w[okj])
         okn = ok & (ip >= 0) & (ip < len(NP_EDGES) - 1)
-        np.add.at(self.npix, (ie[okn], ip[okn]), w[okn])
+        H.hist_add(self.npix, (ie[okn], ip[okn]), w[okn])
+
+
+def cell_closure(km, maps, s):
+    """Per-cell closure numbers and maps of surface s against the RAW data
+    counts (summed over run ranges), all samples on the data illumination."""
+    num, den = maps['emu'][s]
+    xe, ye = km.edges[s]
+    acc = H.in_acceptance(s, 0.5 * (xe[1:] + xe[:-1]))[:, None] & np.ones((1, len(ye) - 1), bool)
+    dn, dd = km.d_num[s].sum(0), km.d_den[s].sum(0)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        e_emu = np.where(den > 0, num / den, np.nan)
+        e_dat = np.where(dd > 0, dn / dd, np.nan)
+        e_mc = np.where(km.m_den[s] > 0, km.m_num[s] / km.m_den[s], np.nan)
+    both = acc & np.isfinite(e_emu) & (dd > 0)
+    meas = both & (dd >= km.min_cell)
+    avg = lambda e, m: float((e[m] * dd[m]).sum() / max(dd[m].sum(), 1e-300))
+    return dict(data=float(dn[both].sum() / max(dd[both].sum(), 1e-300)),
+                mc=avg(np.nan_to_num(e_mc), both), emu=avg(e_emu, both),
+                data_meas=float(dn[meas].sum() / max(dd[meas].sum(), 1e-300)),
+                emu_meas=avg(e_emu, meas),
+                frac_meas=float(dd[meas].sum() / max(dd[both].sum(), 1e-300)),
+                maps=(np.where(meas, e_dat, np.nan), e_emu, np.where(meas, e_emu - e_dat, np.nan)))
 
 
 def tv(h1, h2):
@@ -167,7 +200,9 @@ def main():
     t0 = time.time()
     rng = np.random.default_rng(a.seed)
     info = P.load_epoch(a)
-    km = H.KillMaps.load(a.killmaps)
+    km = H.KillMaps.load(a.killmaps, fallback=a.fallback)
+    print('kill maps %s, level-2 fallback: %s' % (a.killmaps, km.fallback))
+    timing = {}
     if km.meta.get('epoch') != a.epoch:
         die('kill maps are for epoch %s, not %s' % (km.meta.get('epoch'), a.epoch))
     he = H.HitErrors(a.hit_errors) if 'B' in a.route else None
@@ -179,7 +214,8 @@ def main():
             d = d.format(epoch=a.epoch, mu=mu)
             print('loading covflow run %s' % d)
             flows[mu] = H.CovFlow(d, mu, device=a.device)
-    tmpl, run_branch = H.resolve_branches(a, need_cov=True, need_bs=True)
+    tmpl, run_branch = H.resolve_branches(a, need_cov=not a.closure_only,
+                                          need_bs=not a.closure_only)
     tmpl = H.drop_missing_optional(tmpl, info['data'], info['tree'], a.muons)
     has_bs = 'bs_dxy' in tmpl and 'bs_dxy_e' in tmpl
 
@@ -214,7 +250,8 @@ def main():
 
     # --------------------------------------------------------------- data
     print('\n[1/2] data: context, no-hit targets')
-    for chunk, n in H.iterate(info['data'], info['tree'], need_d, a, entries, 'data'):
+    t_pass = time.time()
+    for chunk, n in H.iterate(info['data'], info['tree'], need_d, a, entries, 'data', timing):
         sel = P.eval_selection(sel_d, chunk, n)
         rix = km.range_of_run(np.asarray(chunk[run_branch])[:n][sel])
         for mu in a.muons:
@@ -222,6 +259,8 @@ def main():
             good = H.good_track(v)
             w1 = good.astype(float)
             ctx['data'].fill(v['eta'], v['first_b'], v['first_e'], v['n_pix'], w1)
+            if a.closure_only:
+                continue
             M = None
             for sl, surfs, nxt in (('L1', ('L1',), v['first_b'] == 2),
                                    ('D1', ('D1+', 'D1-'), v['first_e'] == 2)):
@@ -253,7 +292,10 @@ def main():
     writer = None
     if a.write_tree:
         writer = TreeWriter(stem + '_routeB.root', info, a)
-    for chunk, n in H.iterate(info['mc'], info['tree'], need_m, a, entries, 'MC'):
+    timing['data_total'] = time.time() - t_pass
+    timing['data_read'] = timing.pop('read', 0.0)
+    t_pass = time.time()
+    for chunk, n in H.iterate(info['mc'], info['tree'], need_m, a, entries, 'MC', timing):
         sel = P.eval_selection(sel_m, chunk, n)
         if info['mc_weight']:
             wpu = np.asarray(chunk[info['mc_weight']], np.float64)[:n]
@@ -300,9 +342,11 @@ def main():
                 kill = e['kill_L1'] if s == 'L1' else e['kill_D1']
                 ok &= good & ((v['n_pix'] - hit0) >= a.min_other_hits)
                 hit1 = (hit0 & ~kill).astype(float)
-                np.add.at(maps['emu'][s][0], (ix[ok], iy[ok]), wge[ok] * hit1[ok])
-                np.add.at(maps['emu'][s][1], (ix[ok], iy[ok]), wge[ok])
+                H.hist_add(maps['emu'][s][0], (ix[ok], iy[ok]), wge[ok] * hit1[ok])
+                H.hist_add(maps['emu'][s][1], (ix[ok], iy[ok]), wge[ok])
 
+            if a.closure_only:
+                continue
             routes_out = run_routes(a, v, good, e, chunk, sel, flows.get(mu), he, rng, mu)
             zs = H.zsigned(v['z0'], v['eta'])
             for sl, killed, nat in (('L1', e['kill_L1'], v['first_b'] == 2),
@@ -323,9 +367,17 @@ def main():
     if writer is not None:
         writer.close()
 
+    timing['mc_total'] = time.time() - t_pass
+    timing['mc_read'] = timing.pop('read', 0.0)
+
     # ------------------------------------------------------------- report
     lines, summary = report(a, km, tot, ctx, maps, tgt, mcnat, var, checks, has_bs, he)
+    lines += ['', 'TIMING (s): data pass %.0f (reading %.0f), MC pass %.0f (reading %.0f)'
+              % (timing['data_total'], timing['data_read'], timing['mc_total'], timing['mc_read'])]
+    summary['timing'] = timing
     print('\n' + '\n'.join(lines[2:]))
+    for s_ in summary['cells'].values():
+        s_.pop('maps', None)
     with open(stem + '.json', 'w') as fh:
         json.dump(summary, fh, indent=1, default=lambda o: o.item() if hasattr(o, 'item') else str(o))
     plots(a, km, lines, ctx, maps, tgt, mcnat, var, sig_d, sig_m, ab, AB_EDGES, D_EDGES,
@@ -509,22 +561,20 @@ def report(a, km, tot, ctx, maps, tgt, mcnat, var, checks, has_bs, he=None):
          'muons left with no pixel hit: %.4f, with <= 2: %.4f (kept; the reconstruction '
          'would probably have lost some)' % (tot['nopix'] / max(tot['mu'], 1),
                                              tot['lowpix'] / max(tot['mu'], 1)),
-         '', 'PER-CELL CLOSURE (efficiency in acceptance, data illumination)']
+         '', 'PER-CELL CLOSURE: hit efficiency in acceptance, every sample weighted with the '
+         'DATA probes of each cell']
     summary = dict(epoch=a.epoch, totals=tot, cells={}, context={}, routes={})
+    L += ['  data = measured data hits / probes (raw counts, not the kill-map values);',
+          '  "measured cells" = cells with >= %g data probes over the epoch, where the '
+          'per-cell comparison is meaningful' % km.min_cell,
+          '                    all cells                          |  measured cells only',
+          '        data    MC before  MC emulated  emu-data       |  data    MC emulated  emu-data']
     for s in km.surfaces:
-        num, den = maps['emu'][s]
-        xe, ye = km.edges[s]
-        acc = H.in_acceptance(s, 0.5 * (xe[1:] + xe[:-1]))[:, None] & np.ones((1, len(ye) - 1), bool)
-        with np.errstate(divide='ignore', invalid='ignore'):
-            e_emu = num / den
-        e_dat = km.lumi_avg_eps_data(s)
-        illum = km.d_den[s].sum(0)
-        both = acc & np.isfinite(e_emu) & np.isfinite(e_dat) & (illum > 0)
-        ed = (e_dat[both] * illum[both]).sum() / max(illum[both].sum(), 1)
-        ee = (e_emu[both] * illum[both]).sum() / max(illum[both].sum(), 1)
-        em = (km.eps_m[s][both] * illum[both]).sum() / max(illum[both].sum(), 1)
-        L.append('  %-4s data %.4f   MC before %.4f   MC emulated %.4f' % (s, ed, em, ee))
-        summary['cells'][s] = dict(data=ed, mc=em, emu=ee)
+        r = cell_closure(km, maps, s)
+        L.append('  %-4s  %.4f  %.4f     %.4f       %+.4f        |  %.4f  %.4f       %+.4f'
+                 % (s, r['data'], r['mc'], r['emu'], r['emu'] - r['data'],
+                    r['data_meas'], r['emu_meas'], r['emu_meas'] - r['data_meas']))
+        summary['cells'][s] = r
     L += ['', 'CONTEXT CLOSURE: total variation from data (0 = identical), per |eta| bin, '
           'averaged with the data |eta| spectrum',
           '  (first BPix layer x first FPix disk):   MC before %.4f   MC emulated %.4f'
@@ -538,6 +588,16 @@ def report(a, km, tot, ctx, maps, tgt, mcnat, var, checks, has_bs, he=None):
     L.append('  fraction with first BPix layer 0/1/2/3/4:')
     for k, lab in (('data', 'data'), ('mc', 'MC before'), ('emu', 'MC emulated')):
         L.append('     %-12s %s' % (lab, ' '.join('%.4f' % x for x in summary['context'][k]['first_b'])))
+    L.append('  fraction with first FPix disk 0/1/2/3:')
+    for k, lab in (('data', 'data'), ('mc', 'MC before'), ('emu', 'MC emulated')):
+        L.append('     %-12s %s' % (lab, ' '.join('%.4f' % x for x in summary['context'][k]['first_e'])))
+    L.append('  fraction with pixel hits 0/1/2/3/4/5/>=6:')
+    for k, lab in (('data', 'data'), ('mc', 'MC before'), ('emu', 'MC emulated')):
+        h = ctx[k].npix.sum(0)
+        h = h / max(h.sum(), 1e-300)
+        f = list(h[:6]) + [h[6:].sum()]
+        summary['context'][k]['n_pix'] = h.tolist()
+        L.append('     %-12s %s' % (lab, ' '.join('%.4f' % x for x in f)))
     if he is not None:
         L += [''] + he.describe()
         for fam, (path, sample, _e) in he.choice.items():
@@ -606,22 +666,20 @@ def plots(a, km, lines, ctx, maps, tgt, mcnat, var, sig_d, sig_m, ab, AB_EDGES, 
                                                nbins_r=len(km.edges[s][0]) - 1
                                                if s[0] == 'D' else 20))())
         surf.xe, surf.ye = km.edges[s]
-        num, den = maps['emu'][s]
-        with np.errstate(divide='ignore', invalid='ignore'):
-            e_emu = np.where(den > 0, num / den, np.nan)
-        e_dat = km.lumi_avg_eps_data(s)
+        r = cell_closure(km, maps, s)
+        e_dat, e_emu, diff = r['maps']
         fig = plt.figure(figsize=(18, 5.6) if s == 'L1' else (18, 6.2))
-        P.draw_map(fig, (1, 3, 1), surf, e_dat, 'data (luminosity-weighted over ranges)',
-                   'viridis', 0, 1, 'eps')
+        P.draw_map(fig, (1, 3, 1), surf, e_dat, 'data, measured (cells with >= %g probes)'
+                   % km.min_cell, 'viridis', 0, 1, 'eps')
         P.draw_map(fig, (1, 3, 2), surf, e_emu, 'MC after emulation', 'viridis', 0, 1, 'eps')
-        P.draw_map(fig, (1, 3, 3), surf, e_emu - e_dat, 'emulated MC - data', 'RdBu_r',
-                   -0.1, 0.1, 'difference')
+        P.draw_map(fig, (1, 3, 3), surf, diff, 'emulated MC - data (measured cells): %+.4f'
+                   % (r['emu_meas'] - r['data_meas']), 'RdBu_r', -0.1, 0.1, 'difference')
         fig.suptitle('%s per-cell closure, epoch %s' % (s, a.epoch), fontsize=13)
         fig.tight_layout()
         book.add(fig, '%s_closure' % s.replace('+', 'p').replace('-', 'm'))
 
     # context
-    fig, axes = plt.subplots(2, len(CTX_ETA) - 1, figsize=(20, 8))
+    fig, axes = plt.subplots(3, len(CTX_ETA) - 1, figsize=(20, 12))
     style = {'data': ('k', 'o', 'data'), 'mc': ('0.6', 's', 'MC before'),
              'emu': ('#d95f02', 'D', 'MC emulated')}
     for i in range(len(CTX_ETA) - 1):
@@ -638,6 +696,14 @@ def plots(a, km, lines, ctx, maps, tgt, mcnat, var, sig_d, sig_m, ab, AB_EDGES, 
             ax.set_xlabel(lab)
             if row == 0:
                 ax.set_title('%.1f < |eta| < %.1f' % (CTX_ETA[i], CTX_ETA[i + 1]))
+        ax = axes[2, i]
+        for k, (c, mk, lb) in style.items():
+            hh = ctx[k].npix[i]
+            hh = hh / max(hh.sum(), 1e-300)
+            ax.plot(np.arange(len(hh)), hh, mk + '-', color=c, label=lb, ms=5)
+        ax.set_yscale('log')
+        ax.set_ylim(1e-4, 1.5)
+        ax.set_xlabel('pixel hits')
         axes[0, 0].legend(fontsize=9)
     fig.suptitle('Context: hit pattern, data vs MC before / after emulation, epoch %s' % a.epoch,
                  fontsize=13)

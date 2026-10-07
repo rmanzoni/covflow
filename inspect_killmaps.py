@@ -16,6 +16,7 @@ which is what the per-cell closure of emulate_hit_loss.py should show as
 
     python inspect_killmaps.py test_km/killmaps_2026
     python inspect_killmaps.py test_km/killmaps_2026 --max-weight 1.5 2 3 5
+    python inspect_killmaps.py test_km/killmaps_2026 --fallback average   # the pre-Oct-2026 maps
 """
 import argparse
 import numpy as np
@@ -27,10 +28,12 @@ def main():
     p.add_argument('killmaps', help='stem of killmaps_<epoch>.npz/.json')
     p.add_argument('--max-weight', type=float, nargs='+', default=[None],
                    help='recompute with these caps (default: the one stored)')
+    p.add_argument('--fallback', choices=('mcshape', 'average'), default=None,
+                   help='level-2 fallback to re-finalise with (default: as stored)')
     a = p.parse_args()
     for cap in a.max_weight:
-        km = H.KillMaps.load(a.killmaps, max_weight=cap)
-        print('\n=== %s   max_weight %.2f   min_cell %g' % (a.killmaps, km.max_weight, km.min_cell))
+        km = H.KillMaps.load(a.killmaps, max_weight=cap, fallback=a.fallback)
+        print('\n=== %s   max_weight %.2f   min_cell %g   fallback %s' % (a.killmaps, km.max_weight, km.min_cell, km.fallback))
         for s in km.surfaces:
             xe, ye = km.edges[s]
             xc = 0.5 * (xe[1:] + xe[:-1])
@@ -56,7 +59,8 @@ def main():
                       % (r, tot, *fd, *fm, dd[u].sum() / tot, dd[u & (ld == 0)].sum() / tot, -miss))
     print('\nlevel: 0 own cell (>= min_cell probes), 1 nearest run ranges, 2 surface average of the range, 3 none'
           '\n[lev0 data]: part of the uncorrectable probes whose data efficiency is measured in the cell itself;'
-          '\nthe rest compares a surface AVERAGE with a real MC cell and is a fallback artefact.')
+          '\nthe rest sits in fallback cells (with --fallback average: a surface AVERAGE compared'
+          '\nwith a real MC cell, i.e. a fallback artefact).')
 
 
 if __name__ == '__main__':

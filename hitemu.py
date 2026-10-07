@@ -130,17 +130,42 @@ def drop_missing_optional(tmpl, files, tree, muons):
     return tmpl
 
 
-def iterate(files, tree, branches, a, entries, label):
-    """Yield numpy chunks with a progress line (cap: a.max_events entries)."""
+def hist_add(h, idx, w):
+    """h[idx] += w for repeated indices (same as np.add.at, but with bincount:
+    much faster on large arrays). idx is a tuple of integer arrays, one per
+    axis of h, already restricted to valid bins."""
+    if len(w) == 0:
+        return
+    flat = np.ravel_multi_index(tuple(np.asarray(i, np.int64) for i in idx), h.shape)
+    h += np.bincount(flat, weights=np.asarray(w, np.float64), minlength=h.size).reshape(h.shape)
+
+
+def iterate(files, tree, branches, a, entries, label, timing=None):
+    """Yield numpy chunks with a progress line (cap: a.max_events entries).
+    With `timing` (a dict), the time spent reading is added to timing['read'].
+
+    The step is shrunk to max_events when that is smaller, so that a quick
+    test does not read (and decompress) a whole 200 MB step it then drops."""
+    import time as _time
     import uproot
     total = sum(entries[f] for f in files)
     if a.max_events:
         total = min(total, a.max_events)
     prog = Progress(total, label)
     done = 0
-    for chunk in uproot.iterate([{f: tree} for f in files],
-                                expressions=sorted(branches), library='np',
-                                step_size=a.step_size):
+    step = a.step_size
+    if a.max_events:
+        step = min(int(a.max_events), 500000)
+    it = uproot.iterate([{f: tree} for f in files], expressions=sorted(branches),
+                        library='np', step_size=step)
+    while True:
+        t0 = _time.time()
+        try:
+            chunk = next(it)
+        except StopIteration:
+            break
+        if timing is not None:
+            timing['read'] = timing.get('read', 0.0) + _time.time() - t0
         n = len(next(iter(chunk.values())))
         if a.max_events and done + n > a.max_events:
             n = a.max_events - done
@@ -358,7 +383,24 @@ class KillMaps:
         self.finalised = False
 
     # ---------------------------------------------------------------- build
-    def finalise(self, min_cell, max_weight=1.5, prior=None, min_weight=0.2):
+    def finalise(self, min_cell, max_weight=1.5, prior=None, min_weight=0.2,
+                 fallback='mcshape'):
+        """
+        fallback: what a data cell with too few probes in the whole epoch
+        (level 2) gets.
+          'mcshape' (default): eps_MC of the cell times one factor per range and
+                     surface, r = (data hits in those cells) / (sum over their
+                     data probes of eps_MC). Keeps the MC's dead/live structure,
+                     and the data efficiency summed over the fallback cells is
+                     exactly the measured one.
+          'average': the data surface average of the range (until Oct 2026).
+                     Biased low where MC has dead cells: the average already
+                     contains data's dead cells, and MC's dead cells stay dead
+                     on top (seen in the 2026 test as emulated < data on D1).
+        """
+        if fallback not in ('mcshape', 'average'):
+            raise ValueError('fallback must be mcshape or average, not %r' % fallback)
+        self.fallback = fallback
         self.min_cell = float(min_cell)
         self.max_weight = float(max_weight)
         self.min_weight = float(min_weight)
@@ -366,6 +408,7 @@ class KillMaps:
         self.uncorrectable = {}
         self.eps_d, self.eps_m, self.level_d, self.level_m = {}, {}, {}, {}
         self.p_kill, self.w_hit, self.w_nohit = {}, {}, {}
+        self.fallback_ratio = {}
         for s in self.surfaces:
             xe, ye = self.edges[s]
             xc = 0.5 * (xe[1:] + xe[:-1])
@@ -421,6 +464,15 @@ class KillMaps:
                     eps[r] = np.where(ok, val, eps[r])
                     filled |= ok
                 lev[r] = np.where(filled, 1, lev[r])
+                if self.fallback == 'mcshape':
+                    l2 = acc & (lev[r] == 2) & np.isfinite(em)
+                    den2 = (dd[r] * np.where(np.isfinite(em), em, 0.0))[l2].sum()
+                    ratio = dn[r][l2].sum() / den2 if den2 > 0 else (
+                        surf_r[r] / em_s if np.isfinite(em_s) and em_s > 0 else np.nan)
+                    if np.isfinite(ratio):
+                        eps[r] = np.where((lev[r] == 2) & np.isfinite(em),
+                                          np.clip(em * ratio, 0, 1), eps[r])
+                    self.fallback_ratio.setdefault(s, []).append(float(ratio))
                 l0 = dd[r] >= self.min_cell
                 eps[r] = np.where(l0, shrink(dn[r], dd[r]), eps[r])
                 lev[r] = np.where(l0, 0, lev[r])
@@ -478,13 +530,14 @@ class KillMaps:
                     min_cell=getattr(self, 'min_cell', None),
                     max_weight=getattr(self, 'max_weight', None),
                     min_weight=getattr(self, 'min_weight', None),
-                    prior=getattr(self, 'prior', None))
+                    prior=getattr(self, 'prior', None),
+                    fallback=getattr(self, 'fallback', None))
         with open(stem + '.json', 'w') as fh:
             json.dump(meta, fh, indent=1, default=lambda o: o.item()
                       if hasattr(o, 'item') else str(o))
 
     @classmethod
-    def load(cls, path, min_cell=None, max_weight=None):
+    def load(cls, path, min_cell=None, max_weight=None, fallback=None):
         stem = path[:-4] if path.endswith('.npz') else path
         if not os.path.isfile(stem + '.npz') or not os.path.isfile(stem + '.json'):
             die('kill maps %s.npz/.json not found (run build_kill_maps.py first)' % stem)
@@ -500,7 +553,8 @@ class KillMaps:
                  meta)
         return km.finalise(min_cell if min_cell is not None else meta.get('min_cell') or 30,
                            max_weight if max_weight is not None else meta.get('max_weight') or 1.5,
-                           meta.get('prior'), meta.get('min_weight') or 0.2)
+                           meta.get('prior'), meta.get('min_weight') or 0.2,
+                           fallback or meta.get('fallback') or 'mcshape')
 
 
 # ---------------------------------------------------------------------------
@@ -1005,7 +1059,7 @@ class RwHist:
                 ls = np.log10(sg[:, j])
             ik = np.searchsorted(e, ls, 'right') - 1
             okk = ok & (ik >= 0) & (ik < len(e) - 1)
-            np.add.at(self.h[p], (cell[okk], ik[okk]), w[okk])
+            hist_add(self.h[p], (cell[okk], ik[okk]), w[okk])
         self.n += float(w[ok].sum())
 
     def cells(self):
