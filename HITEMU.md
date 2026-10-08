@@ -153,7 +153,7 @@ Modules die (and are sometimes recovered) during the year, so one map per epoch 
 
 It stops when one of three things happens:
 
-- there are 8 blocks (`--max-ranges`);
+- there are 10 blocks (8 until 8 Oct 2026) (`--max-ranges`);
 - a further split would leave a block with fewer than 122,880 L1 probes, i.e. 40 per L1 cell on average (`--min-cell-probes` × 3072);
 - the gain is below 25 in −2 ln L (`--min-gain`).
 
@@ -870,7 +870,7 @@ Ranked by how much they matter for the analysis. "Section" points to the explana
 | 5 | **Muons starting at L3 or with no BPix hit**: 3.8% / 3.4% in 2026 data, 0.3% / 2.1% emulated; 2.5% / 1.8% against 0.3% / 1.2% in 2025; also visible in 2024 | Data also lose L2/L3, which the L1/D1-only code cannot emulate (known, section 9.2) | yes: what the Bmmm mask patch is for | 10.7 |
 | 6 | **The run ranges stop at 8 in 2024 and 2025**, and inside every range the L1 hit efficiency of single runs scatters by 1–2% rms more than statistics (χ²/ndf 5–30) | `--max-ranges 8` is binding; modules come and go from run to run | small for single-layer marginals (they average exactly); matters for correlations between layers once all layers are killed | 10.8 |
 | 7 | **D1 is starved in the small epochs:** up to 54% of the D1 probes of a range take their value from neighbouring ranges (2023_preBPix range 2; 2022_preEE 27–33%) | Range size is set by L1 only (≥ 40 probes per L1 cell); D1 has fewer probes per cell | moderate: D1 in 2022–23 is followed with a delay | 10.9 |
-| 8 | **Mixture test fails for D1 in 2022–2023 data**: W0 has 19–38% wider σ(dxy) than D0 (KS 0.17–0.29) | Few dead D1 cells (342–1578 tracks), at particular places; passes in 2024–26 and in all MC | the "random loss" assumption is not shown for D1 in 2022–23 | 10.10 |
+| 8 | **Mixture test fails for D1 in 2022–2023 data**: W0 has 19–38% wider σ(dxy) than D0 (KS 0.17–0.29) | Not statistics: the "dead" D1 cells of 2022–23 are the disk's outer ring (94–100% of D0 probes at r > 13.8 cm), where data and MC disk radii differ. **Fixed:** data D0 cells must be alive in MC | the test was comparing with the wrong population | 10.10 |
 | 9 | **Route B is skipped in 2022_preEE and 2023_postBPix**; elsewhere it moves σ(dxy) by only 0.02–0.03 in log10 out of 0.2–0.27; the D1 hit errors sit at the 500 µm bound | Too few dead cells for a fit (early epochs); one V per \|η\| bin pinned by non-PD tracks (known, section 9.8) | low (route B is the back-up), but confirms the per-track V redesign | 10.11 |
 | 10 | **Files and logs missing from the copy**: `2022_preEE/noL1_mc` and `2023_preBPix/emu` are empty folders, though the summary says OK; only two logs (2022_preEE steps 1–2) | Partial copy from t3ui07 | only for this review | 10.1 |
 | 11 | **Closure residuals all negative on L1/D1 (−0.04 to −0.15%)** in the early epochs | The floor 0.2 on w_nohit (fixed: default 0 since the mask commit) | small; gone at the next run | 10.3 |
@@ -1024,7 +1024,7 @@ This is the missing L2/L3 (and D2) emulation of section 9.2, now seen in every e
 - Single runs scatter well beyond statistics: up to 25 standard deviations (2025 run 394677: 0.807 against 0.863 for its range). Modules come and go from run to run. 2025 range 2 alone holds 142 runs and 34% of the year.
 - **For single-layer quantities this is harmless.** The average over runs of the per-run efficiency is what the emulation reproduces, and it is linear.
 - **It is not harmless for correlations between layers.** P(L1 and L2 both lost) averaged over runs is not the product of the averages when both vary together. With the masks every layer is killed independently in each range, so the ranges should be finer.
-- **Action:** raise `--max-ranges` to 16–20 for 2024–2025 at the next run. It costs nothing in time; the minimum of 40 probes per L1 cell still applies. Per-run ranges are the limit for the large epochs.
+- **Action (done, 8 Oct):** the default `--max-ranges` is now 10. It costs nothing in time; the minimum of 40 probes per L1 cell still applies. With the larger production (×10 statistics) single-run ranges become possible for most of 2024–2025.
 
 ### 10.9 Statistics per range: D1 left short in the small epochs
 
@@ -1046,8 +1046,15 @@ This is the missing L2/L3 (and D2) emulation of section 9.2, now seen in every e
 - **D1 in 2022–2023 data fails:** +0.075 to +0.139 (σ 19–38% wider for W0), KS 0.17–0.29.
   - There are few D0 tracks (342–1578), all in a handful of dead cells.
   - In 2024–2026 data (19k–75k D0 tracks) and in all MC it passes.
-  - Most likely it is the location of those few dead cells, not a property of the hit loss.
-- **Consequence:** for D1 in 2022–2023 the "missing hit = dead-cell loss" assumption is not shown. D1 kills there are ~3% of the D1 hits, so it matters little.
+- **Not statistics (checked 8 Oct).** With 342–1578 tracks the median is known to ~0.01 in log10, and the shifts are 0.075–0.14. The "dead" D1 cells of 2022–2023 are not dead modules: **94–100% of their probes sit on the outer ring, r > 13.8 cm**. That is where the data and MC disks end at different radii (section 9.6). Tracks predicted to cross D1 there physically miss the disk, which is a different population from a muon that crossed a dead module. In 2024–2025 the D0 is diluted by real dead modules in the interior (14–36% of the probes on D1−), and the test passes.
+
+  | | D1+ D0 probes on the outer ring | D1− D0 probes on the outer ring |
+  |---|---|---|
+  | 2022_preEE, 2022_postEE, 2023_preBPix, 2023_postBPix | 94–96% | 99–100% |
+  | 2024 | 95% | 85% |
+  | 2025 | 87% | 61% |
+
+- **Fix (in the code since 8 Oct):** in data, a D0 cell must also work in MC (ε_MC ≥ `--eps-working`). It is then a loss of data only, which is exactly what the emulation creates; geometric edges, dead in both, drop out. `--d0-any-mc` restores the old definition. Expect fewer D0 tracks for D1 in 2022–2023, and a meaningful test.
 
 ### 10.11 Routes per epoch
 
@@ -1078,7 +1085,7 @@ This is the missing L2/L3 (and D2) emulation of section 9.2, now seen in every e
 4. **2024 D1−** (#2): decide between accept-and-quote (default) and range assignment by sector (10.5).
 5. **Bmmm per-layer masks** (#5): nothing here argues against them; 10.7 shows they are needed in 2024 and 2025 too. After the cmsenv test and the merge, the next production gives all ten surfaces.
 6. **At the next full run** (after the masks):
-   - `--max-ranges 16` (#6);
+   - `--max-ranges` 10, now the default (#6);
    - a split rule that looks at all surfaces (#7);
    - optionally the selection-loss weight of 10.4 (#4).
 7. **Route B per-track V** (#9), only if route A turns out insufficient.
@@ -1128,7 +1135,7 @@ This is the missing L2/L3 (and D2) emulation of section 9.2, now seen in every e
 
 | script | option | default | meaning |
 |---|---|---|---|
-| build_kill_maps | `--max-ranges` | 8 | maximum number of run ranges |
+| build_kill_maps | `--max-ranges` | 10 | maximum number of run ranges (8 until 8 Oct 2026) |
 | | `--min-cell-probes` | 40 | minimum mean probes per L1 cell in a range (× 3072 = minimum per range) |
 | | `--min-gain` | 25 | minimum −2 ln L gain to split |
 | | `--min-cell` | 30 | probes for a cell's own value (else fallback) |

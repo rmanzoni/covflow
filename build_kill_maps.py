@@ -50,7 +50,7 @@ def parse_args():
                    help='phi bins of the kill maps (default %(default)s: about two '
                         'per L1 ROC row)')
     p.add_argument('--nbins-r', type=int, default=20)
-    p.add_argument('--max-ranges', type=int, default=8)
+    p.add_argument('--max-ranges', type=int, default=10)
     p.add_argument('--min-cell-probes', type=float, default=40.,
                    help='a run range must hold on average this many L1 probes per '
                         'cell in acceptance (sets the minimum range size)')
