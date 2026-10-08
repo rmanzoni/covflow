@@ -1137,6 +1137,24 @@ class CovFlow:
                                                  device=self.device)
         return F.matrix_to_packed(to_mat(self.scaler.x_inv(ys)))
 
+    def morph_mc(self, packed, C_from, C_to):
+        """f_MC^-1( f_MC(x; c_from); c_to ): the MC part of route A.
+
+        Same quantile of the MC covariance distribution, moved from the original
+        context to the emulated one, staying in MC. The result is an MC-like
+        covariance for a track that lost the hit; applying covflow to it at c_to,
+        f_data^-1(f_MC(.; c_to); c_to), gives exactly route A. So route A splits into
+        (1) hit loss inside MC (this) and (2) the usual covflow correction, and the
+        parameters can be smeared with N(0, C_MC' - C), a pure hit-loss term."""
+        to_feat, to_mat = F.get_transforms(self.param)
+        y = F.packed_to_features(np.asarray(packed, np.float64), self.param)
+        ys = self.scaler.x(y)
+        z = self.FL.data_to_latent(self.f_mc, ys[:, self.idx], self.scaler.c(C_from),
+                                   device=self.device)
+        ys[:, self.idx] = self.FL.latent_to_data(self.f_mc, z, self.scaler.c(C_to),
+                                                 device=self.device)
+        return F.matrix_to_packed(to_mat(self.scaler.x_inv(ys)))
+
 
 # ---------------------------------------------------------------------------
 # reweighted comparisons (shared by the two diagnostic scripts)

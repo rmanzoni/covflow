@@ -23,8 +23,13 @@ STEP 5, --route B. The information of the removed hit is taken out of the MC
 covariance, with the hit errors fitted by noL1_data_study.py:
         C'_B,raw   = (C^-1 - H^T V^-1 H)^-1          (MC-like at c')
         C'_B,final = f_data^-1( f_MC(C'_B,raw ; c') ; c')   if flows are given
-The B,raw output is what a covflow retrained on emulated MC would start from
-(--write-tree).
+Route A splits into two steps (since 8 Oct 2026, variant "A, MC part"):
+        C'_MC = f_MC^-1( f_MC(C; c) ; c' )                (hit loss inside MC)
+        C'_A  = f_data^-1( f_MC(C'_MC; c') ; c')          (the usual covflow at c')
+The MC part is what the emulated MC tree carries (--write-tree --tree-route A):
+the existing covflow, applied at the emulated context, then gives route A, with
+no retraining, and the parameters are smeared with N(0, C'_MC - C), a pure
+hit-loss term (the data/MC correction is not in it).
 
 Route checks, on the muons that lost L1 (and separately D1):
   - C' - C must be a valid covariance (losing a hit cannot make a track more
@@ -43,7 +48,8 @@ Usage (tcsh, UI, covflow env):
   python emulate_hit_loss.py --epoch 2026 --killmaps killmaps_2026/killmaps_2026 \\
          --route A B --flow-dir "$RUNS/@epoch@/@mu@/task_0" \\
          --hit-errors noL1_data_2026/hiterrors_data_2026.json
-  add --write-tree to also write the emulated MC (route B,raw covariances)
+  add --write-tree to also write the emulated MC (route A, MC part, by default
+  when route A runs; --tree-route B for route B,raw)
 """
 
 from __future__ import annotations
@@ -67,9 +73,10 @@ FE_EDGES = np.arange(-0.5, 4.5)       # first FPix disk 0..3
 NP_EDGES = np.arange(-0.5, 12.5)      # pixel hits
 CTX_ETA = np.array([0.0, 0.8, 1.2, 1.6, 2.0, 2.6])
 SIG_EDGES = np.linspace(-10, 40, 101)
-VARIANTS = ('orig', 'A', 'Braw', 'Bfin')
-VLABEL = {'orig': 'MC before (C)', 'A': "route A", 'Braw': 'route B, raw (MC-like)',
-          'Bfin': 'route B, final'}
+VARIANTS = ('orig', 'A', 'Amc', 'Braw', 'Bfin')
+VLABEL = {'orig': 'MC before (C)', 'A': "route A", 'Amc': 'route A, MC part (MC-like)',
+          'Braw': 'route B, raw (MC-like)', 'Bfin': 'route B, final'}
+ROUTE_KEYS = ('A', 'Amc', 'Braw', 'Bfin')
 
 
 def parse_args():
@@ -89,10 +96,17 @@ def parse_args():
     p.add_argument('--device', default='cpu')
     p.add_argument('--eps-dead', type=float, default=0.4,
                    help='dead cell for the "random losses only" data target')
+    p.add_argument('--dead-any-mc', action='store_true',
+                   help='also count as dead the cells dead in MC too (geometric edges, e.g. the '
+                        'D1 outer ring). Default: the cell must work in MC (eps_MC >= 0.95), a '
+                        'loss of data only, like the ones the emulation creates')
     p.add_argument('--seed', type=int, default=12345)
     p.add_argument('--write-tree', action='store_true',
-                   help='write the emulated MC (needs route B): context and '
-                        'covariance branches replaced, see the output json')
+                   help='write the emulated MC: context and covariance branches '
+                        'replaced, see the output json')
+    p.add_argument('--tree-route', choices=('A', 'B'), default=None,
+                   help='covariance written by --write-tree: A = route A, MC part '
+                        '(default when route A runs), B = route B,raw')
     p.add_argument('--closure-only', action='store_true',
                    help='only the hit killing and its closure (per cell, context): '
                         'the covariance and beamspot branches are not read and no '
@@ -117,8 +131,10 @@ def parse_args():
         die('--route B needs --hit-errors')
     if a.closure_only and (a.route or a.write_tree):
         die('--closure-only cannot be combined with --route / --write-tree')
-    if a.write_tree and 'B' not in a.route:
-        die('--write-tree writes route B,raw covariances: add --route B')
+    if a.tree_route is None:
+        a.tree_route = 'A' if 'A' in a.route else 'B'
+    if a.write_tree and a.tree_route not in a.route:
+        die('--write-tree --tree-route %s needs --route %s' % (a.tree_route, a.tree_route))
     return a
 
 
@@ -291,11 +307,13 @@ def main():
                                    ('D1', ('D1+', 'D1-'), v['first_e'] == 2)):
                 inmap = np.zeros(len(good), bool)
                 eps = np.full(len(good), np.nan)
+                mc_alive = np.zeros(len(good), bool)
                 for s in surfs:
                     x, y = H.cross_view(s, v)
                     ix, iy, ok = km.lookup(s, x, y)
                     inmap |= ok
                     eps = np.where(ok, km.eps_d[s][rix, ix, iy], eps)
+                    mc_alive = np.where(ok, np.nan_to_num(km.eps_m[s][ix, iy]) >= 0.95, mc_alive)
                 m = good & inmap & nxt & np.all(np.isfinite(v['cov']), 1)
                 if not m.any():
                     continue
@@ -304,6 +322,8 @@ def main():
                 zs = H.zsigned(v['z0'], v['eta'])
                 with np.errstate(invalid='ignore'):
                     dead = m & (eps <= a.eps_dead)
+                if not a.dead_any_mc:
+                    dead &= mc_alive        # data-only losses, not geometric edges
                 for key, mm in (('all', m), ('dead', dead)):
                     tgt[sl][key].fill(v['pt'][mm], v['eta'][mm], v['n_pix'][mm], zs[mm],
                                       M[mm], np.ones(mm.sum()))
@@ -316,7 +336,7 @@ def main():
     print('\n[2/2] MC: emulation%s' % (', routes ' + ' '.join(a.route) if a.route else ''))
     writer = None
     if a.write_tree:
-        writer = TreeWriter(stem + '_routeB.root', info, a)
+        writer = TreeWriter(stem + '_route%s.root' % a.tree_route, info, a)
     timing['data_total'] = time.time() - t_pass
     timing['data_read'] = timing.pop('read', 0.0)
     t_pass = time.time()
@@ -415,7 +435,7 @@ def main():
     plots(a, km, lines, ctx, maps, tgt, mcnat, var, sig_d, sig_m, ab, AB_EDGES, D_EDGES,
           has_bs, stem)
     print('\n[out] %s.pdf, %s.json%s   (%.1f min)'
-          % (stem, stem, (', %s_routeB.root' % stem) if writer else '', (time.time() - t0) / 60))
+          % (stem, stem, (', %s_route%s.root' % (stem, a.tree_route)) if writer else '', (time.time() - t0) / 60))
 
 
 def run_routes(a, v, good, e, chunk, sel, flow, he, rng, mu):
@@ -447,7 +467,18 @@ def run_routes(a, v, good, e, chunk, sel, flow, he, rng, mu):
         cp = flow.context(chunk, sel, e, sub=idx)
         pA = flow.morph(C0p, c, cp)
         out['A'] = (pA, np.all(np.isfinite(pA), 1))
-    for k in ('A', 'Braw', 'Bfin'):
+        # the MC part: f_MC^-1(f_MC(C; c); c'), and the check that covflow on it gives A
+        pM = flow.morph_mc(C0p, c, cp)
+        okM = np.all(np.isfinite(pM), 1)
+        out['Amc'] = (pM, okM)
+        pMc = np.full_like(pM, np.nan)
+        if okM.any():
+            pMc[okM] = flow.morph(pM[okM], cp[okM], cp[okM])
+        with np.errstate(divide='ignore', invalid='ignore'):
+            sa = H.sigmas(H.packed_to_matrix(np.where(np.isfinite(pA), pA, C0p)))
+            sm = H.sigmas(H.packed_to_matrix(np.where(np.isfinite(pMc), pMc, C0p)))
+            out['A_split'] = np.abs(np.log10(sa[:, 3]) - np.log10(sm[:, 3]))
+    for k in ROUTE_KEYS:
         if k in out:
             M = H.packed_to_matrix(np.where(np.isfinite(out[k][0]), out[k][0], C0p))
             delta, clipped, neg = H.smear(M, C0, rng)
@@ -472,7 +503,10 @@ def fill_route_checks(sl, m, v, e, zs, w, ro, var, checks, sig_m, ab, AB_EDGES, 
     if has_bs:
         with np.errstate(divide='ignore', invalid='ignore'):
             sig_m[sl]['orig'].fill(cell, v['bs_dxy'][m] / v['bs_dxy_e'][m], wm)
-    for k in ('A', 'Braw', 'Bfin'):
+    if 'A_split' in ro:
+        d = ro['A_split'][pos]
+        checks[sl]['Amc'].setdefault('split', []).append(d[np.isfinite(d)])
+    for k in ROUTE_KEYS:
         if k not in ro:
             continue
         packed, ok, M, delta, clipped, neg = ro[k]
@@ -508,9 +542,10 @@ def fill_route_checks(sl, m, v, e, zs, w, ro, var, checks, sig_m, ab, AB_EDGES, 
 
 
 class TreeWriter:
-    """Selected MC events with the emulated context and route B,raw covariances,
-    under the ORIGINAL branch names, so that covflow can be trained on it
-    unchanged. Everything replaced is listed in the companion json."""
+    """Selected MC events with the emulated context and the MC-like covariance of
+    the chosen route (A, MC part, or B,raw), under the ORIGINAL branch names, so
+    that covflow can be applied (route A) or retrained (route B) on it unchanged.
+    Everything replaced is listed in the companion json."""
 
     CTX = {'n_pix_hit': 'n_pix', 'n_pix_b_hit': 'n_pix_b', 'n_pix_e_hit': 'n_pix_e',
            'pix_first_b_layer': 'first_b', 'pix_first_e_disk': 'first_e',
@@ -550,8 +585,9 @@ class TreeWriter:
             idx = ro.get('idx', np.zeros(0, int))
             okB = np.ones(len(e['w']), np.float32)
             dl = np.zeros((len(e['w']), 5), np.float32)
-            if 'Braw' in ro and len(idx):
-                packed, ok, M, delta, clipped, neg = ro['Braw']
+            key = 'Amc' if self.a.tree_route == 'A' else 'Braw'
+            if key in ro and len(idx):
+                packed, ok, M, delta, clipped, neg = ro[key]
                 for j, nm in enumerate(H.PACK_NAMES):
                     name = '%s_cov_%s' % (mu, nm)
                     col = np.asarray(out[name], np.float64).copy()
@@ -559,7 +595,7 @@ class TreeWriter:
                     out[name] = col
                 okB[idx] = ok
                 dl[idx] = np.nan_to_num(delta)
-            out['%s_emu_routeB_ok' % mu] = okB
+            out['%s_emu_route_ok' % mu] = okB
             for j, p in enumerate(PARAMS):
                 out['%s_emu_delta_%s' % (mu, p)] = dl[:, j]
         out = {k: (np.asarray(v).astype(np.int64) if k in ('run', 'lumi', 'event', 'emu_range')
@@ -575,19 +611,22 @@ class TreeWriter:
         self.f.close()
         meta = dict(
             epoch=self.a.epoch, killmaps=os.path.abspath(self.a.killmaps),
-            hit_errors=[os.path.abspath(x) for x in self.a.hit_errors], seed=self.a.seed,
+            hit_errors=[os.path.abspath(x) for x in (self.a.hit_errors or [])], seed=self.a.seed,
+            tree_route=self.a.tree_route,
             rows=self.n, selection_applied=True,
             replaced=dict(
                 context='{mu}_' + ', {mu}_'.join(self.CTX) + ' -> emulated '
                         '(originals in {mu}_orig_*)',
-                covariance='{mu}_cov_* -> route B,raw for muons that lost a hit',
+                covariance='{mu}_cov_* -> %s for muons that lost a hit'
+                           % ('route A, MC part (apply covflow at the emulated context)'
+                              if self.a.tree_route == 'A' else 'route B,raw'),
                 weight='%s -> %s * emu_weight (original in %s_noemu)'
                        % (self.info['mc_weight'], self.info['mc_weight'], self.info['mc_weight'])),
             added=['emu_weight', 'emu_range', '{mu}_emu_kill_L1', '{mu}_emu_kill_D1',
                    '{mu}_emu_kill_mask (layers whose hits were removed, same bits as '
                    '{mu}_pix_valid_mask)',
-                   '{mu}_emu_routeB_ok', '{mu}_emu_delta_<param> (route B smearing, '
-                   'NOT applied to any branch)'])
+                   '{mu}_emu_route_ok', '{mu}_emu_delta_<param> (smearing N(0, C\' - C) '
+                   'of the route written, NOT applied to any branch)'])
         with open(self.path.replace('.root', '.json'), 'w') as fh:
             json.dump(meta, fh, indent=1)
 
@@ -663,7 +702,7 @@ def report(a, km, tot, ctx, maps, tgt, mcnat, var, checks, has_bs, he=None):
               '(clipped for the smearing)',
               '  grows    : fraction with sigma\'(dxy) >= sigma(dxy) / sigma\'(dsz) >= sigma(dsz)']
         for sl in ('L1', 'D1'):
-            for k in ('A', 'Braw', 'Bfin'):
+            for k in ROUTE_KEYS:
                 c = checks[sl][k]
                 if c['n'] <= 0:
                     continue
@@ -675,6 +714,12 @@ def report(a, km, tot, ctx, maps, tgt, mcnat, var, checks, has_bs, he=None):
                           float(np.median(negs)) if len(negs) else 0.0,
                           c['up_dxy'] / c['n'], c['up_dsz'] / c['n']))
                 L.append(row)
+                if k == 'Amc' and c.get('split'):
+                    sp = np.concatenate(c['split'])
+                    if len(sp):
+                        L.append('     covflow(A, MC part) vs route A, |delta log10 sigma(dxy)|: '
+                                 'median %.2g, 99%% %.2g (should be ~0: A = MC part + covflow)'
+                                 % (np.median(sp), np.quantile(sp, 0.99)))
             for tkey, tlab in (('dead', 'data, dead cells (random losses)'),
                                ('all', 'data, all no-hit tracks')):
                 T = tgt[sl][tkey]
@@ -694,14 +739,17 @@ def report(a, km, tot, ctx, maps, tgt, mcnat, var, checks, has_bs, he=None):
                     L.append('     %-24s %+.4f / %+.4f / %+.4f   (%.3f)' % (VLABEL[k], *sh, ks))
                     summary['routes'].setdefault(sl, {}).setdefault(tkey, {})[k] = dict(
                         shift_dxy=sh[0], shift_dsz=sh[1], shift_qoverp=sh[2], ks_dxy=ks)
-            if mcnat[sl].n > 0 and var[sl]['Braw'].n > 0:
-                sh = []
-                for p in ('dxy', 'dsz'):
-                    hv = var[sl]['Braw'].projected(p, target=mcnat[sl])
-                    sh.append(H.quantiles(hv, H.LOGSIG_EDGES[p])[1]
-                              - H.quantiles(mcnat[sl].projected(p), H.LOGSIG_EDGES[p])[1])
-                L.append('  %s closure in MC: route B,raw vs MC tracks without the hit: '
-                         'shift dxy %+.4f, dsz %+.4f' % (sl, *sh))
+            for k in ('Amc', 'Braw'):
+                if mcnat[sl].n > 0 and var[sl][k].n > 0:
+                    sh = []
+                    for p in ('dxy', 'dsz'):
+                        hv = var[sl][k].projected(p, target=mcnat[sl])
+                        sh.append(H.quantiles(hv, H.LOGSIG_EDGES[p])[1]
+                                  - H.quantiles(mcnat[sl].projected(p), H.LOGSIG_EDGES[p])[1])
+                    L.append('  %s closure in MC: %s vs MC tracks without the hit: '
+                             'shift dxy %+.4f, dsz %+.4f' % (sl, VLABEL[k], *sh))
+                    summary.setdefault('mc_closure', {}).setdefault(sl, {})[k] = dict(
+                        shift_dxy=sh[0], shift_dsz=sh[1])
     return L, summary
 
 
@@ -775,6 +823,7 @@ def plots(a, km, lines, ctx, maps, tgt, mcnat, var, sig_d, sig_m, ab, AB_EDGES, 
                 ax.step(xc, T.projected(p), where='mid', color='k', lw=1.6,
                         label='data, dead cells (target)')
                 for k, c, ls in (('orig', '0.6', '--'), ('A', '#1b9e77', '-'),
+                                 ('Amc', '#1b9e77', '--'),
                                  ('Braw', '#d95f02', '--'), ('Bfin', '#d95f02', '-')):
                     if var[sl][k].n > 0:
                         ax.step(xc, var[sl][k].projected(p, target=T), where='mid', color=c,
@@ -819,6 +868,7 @@ def plots(a, km, lines, ctx, maps, tgt, mcnat, var, sig_d, sig_m, ab, AB_EDGES, 
                 ax.step(xc, sig_d[sl].projected(), where='mid', color='k', lw=1.6,
                         label='data, all without %s' % sl)
                 for k, c, ls in (('orig', '0.6', '--'), ('A', '#1b9e77', '-'),
+                                 ('Amc', '#1b9e77', '--'),
                                  ('Braw', '#d95f02', '--'), ('Bfin', '#d95f02', '-')):
                     if sig_m[sl][k].h.sum() > 0:
                         ax.step(xc, sig_m[sl][k].projected(target=sig_d[sl]), where='mid',
