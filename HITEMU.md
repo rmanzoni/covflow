@@ -424,7 +424,7 @@ With routes the same page gains three curves. Until they are run on real data, h
 
 With route B the last step (6) is to retrain covflow's MC side on the emulated MC (`WRITE_TREE = 1` in `run_hitemu.csh`; `emu_<epoch>_routeB.json` lists which branches are replaced).
 
-**Status after the per-epoch run with flows (section 10.13, 8 Oct 2026): route A.** It closes on the dead-cell target in every epoch (L1: within 0.03, 2024: −0.008), route B does not. Route A is split into an MC-only morph plus the usual covflow, so the emulated MC tree needs no retraining (`--tree-route A`, the default).
+**Status after the per-epoch run with flows (section 10.13, 8 Oct 2026): route A.** It closes on the dead-cell target in every epoch (L1: within 0.03; 2024 −0.008, 2025 −0.010, 2026 −0.003), route B does not. Route A is split into an MC-only morph plus the usual covflow, so the emulated MC tree needs no retraining (`--tree-route A`, the default).
 
 ---
 
@@ -874,7 +874,7 @@ Ranked by how much they matter for the analysis. "Section" points to the explana
 | 7 | **D1 is starved in the small epochs:** up to 54% of the D1 probes of a range take their value from neighbouring ranges (2023_preBPix range 2; 2022_preEE 27–33%) | Range size is set by L1 only (≥ 40 probes per L1 cell); D1 has fewer probes per cell | moderate: D1 in 2022–23 is followed with a delay | 10.9 |
 | 8 | **Mixture test fails for D1 in 2022–2023 data**: W0 has 19–38% wider σ(dxy) than D0 (KS 0.17–0.29) | Not statistics: the "dead" D1 cells of 2022–23 are the disk's outer ring (94–100% of D0 probes at r > 13.8 cm), where data and MC disk radii differ. **Fixed:** data D0 cells must be alive in MC | the test was comparing with the wrong population | 10.10 |
 | 9 | **Route B is skipped in 2022_preEE and 2023_postBPix**; elsewhere it moves σ(dxy) by only 0.02–0.03 in log10 out of 0.2–0.27; the D1 hit errors sit at the 500 µm bound | Too few dead cells for a fit (early epochs); one V per \|η\| bin pinned by non-PD tracks (known, section 9.8) | none any more: **route B is dropped** (route A closes; B, final is worse than no correction, section 10.13) | 10.11, 10.13 |
-| 10 | **Files and logs missing from the copy**: `2022_preEE/noL1_mc` and `2023_preBPix/emu` are empty folders, though the summary says OK; only two logs (2022_preEE steps 1–2) | Partial copy from t3ui07 | only for this review | 10.1 |
+| 10 | **Files and logs missing from the copy** (first run) | Partial copy from t3ui07 | **solved** in the rerun | 10.1 |
 | 11 | **Closure residuals all negative on L1/D1 (−0.04 to −0.15%)** in the early epochs | The floor 0.2 on w_nohit (fixed: default 0 since the mask commit) | small; gone at the next run | 10.3 |
 | 12 | 2022_preEE and 2022_postEE both use `pu_weight_2022` | Probably one 2022 PU profile in the ntuples; the two MC samples differ (Summer22 / Summer22EE), so the maps differ | minor; check the pre/post-EE PU profiles | 10.1 |
 
@@ -882,13 +882,13 @@ Ranked by how much they matter for the analysis. "Section" points to the explana
 
 ![status](docs/hitemu_figs/e08_status.png)
 
-*Per epoch (rows) and step (columns). Green: output present. Yellow: the summary says the step ran, but its files are not in the copy on the Mac. Red: route B could not run (no hit-error fit, see 10.11). Grey: route A never ran, in any epoch, because no trained flows were found.*
+*Per epoch (rows) and step (columns), for the rerun of 8 October with the correct flow directory. Green: output present. Red: route B could not run (no hit-error fit, see 10.11). In the first run (7 October) route A was missing everywhere (no flows found under the wrong `RUNS` tag), and two outputs plus most logs were missing from the copy; both are solved.*
 
 | epoch | data runs | run ranges | selected data events | MC events | MC PU weight | L1 ε data / MC | D1+ ε data / MC | D1− ε data / MC |
 |---|---|---|---|---|---|---|---|---|
 | 2022_preEE | 131 (355862–357900) | 3 | 238k | 0.31M | pu_weight_2022 | 0.929 / 0.944 | 0.960 / 0.967 | 0.968 / 0.986 |
 | 2022_postEE | 182 (359569–362760) | 7 | 928k | 1.14M | pu_weight_2022 | 0.915 / 0.940 | 0.957 / 0.970 | 0.963 / 0.986 |
-| 2023_preBPix | 125 (367095–368823) | 6 | 685k | (not copied) | pu_weight_2023 | 0.920 / 0.938 | 0.953 / 0.963 | 0.968 / 0.983 |
+| 2023_preBPix | 125 (367095–368823) | 6 | 685k | 0.67M | pu_weight_2023 | 0.920 / 0.938 | 0.953 / 0.963 | 0.968 / 0.983 |
 | 2023_postBPix | 43 (369927–370790) | 4 | 364k | 0.30M | pu_weight_2023 | 0.930 / 0.946 | 0.947 / 0.958 | 0.965 / 0.982 |
 | 2024 | 451 (379416–386951) | **8 (cap)** | 3.33M | **3.63M** | pu_weight_2024 | 0.894 / 0.946 | 0.952 / 0.959 | **0.893 / 0.871** |
 | 2025 | 458 (391688–398860) | **8 (cap)** | 3.25M | **3.63M (same)** | pu_weight_2025 | 0.773 / 0.945 | 0.914 / 0.960 | 0.821 / 0.879 |
@@ -896,13 +896,13 @@ Ranked by how much they matter for the analysis. "Section" points to the explana
 
 *Hit efficiency ε in nominal acceptance, MC averaged on the data illumination (as in the per-cell closure). D1− in 2024 is the only place where data is more efficient than MC (10.5).*
 
-**Route A (#1).** The driver looks for `$RUNS/<epoch>/mu1/task_0/covflow.json` and `…/mu2/…`. Not one epoch had both, so every emulation ran with route B alone (`OK_B`) and the route pages compare *raw* MC covariances with data. Check on t3ui07:
+**Route A (#1), solved 8 Oct.** The driver looks for `$RUNS/<epoch>/mu1/task_0/covflow.json` and `…/mu2/…`. In the first run not one epoch had both (wrong `RUNS` tag), so every emulation ran with route B alone (`OK_B`). With `RUNS = …/run3_epochs_05oct26_trgmatch_e1200` all seven epochs ran route A (section 10.13). The check, for the future:
 
 ```
 ls /work/manzoni/correct_track_covariance/covflow-runs/run3_epochs_05oct26/*/mu?/task_0/covflow.json
 ```
 
-**Missing files (#10).** On t3ui07 they should be in `hitemu/2022_preEE/noL1_mc/`, `hitemu/2023_preBPix/emu/` and `hitemu/logs/` (one log per epoch and step). The 2022_preEE emulation ran without route B (`OK_noB`), so its MC hit-error fit was empty too. Copy them over and the 2023_preBPix entries in the plots below fill in.
+**Missing files (#10), solved 8 Oct.** The rerun's copy is complete (all outputs, one log per epoch and step); the 2023_preBPix entries in the plots below are filled in. The 2022_preEE MC hit-error fit is empty too (0–16 D0 tracks per bin), hence `OK_A_noB` there.
 
 ### 10.2 One look at all of Run 3
 
@@ -920,7 +920,7 @@ How to read it:
 
 ![closure per epoch](docs/hitemu_figs/e02_closure_epochs.png)
 
-*Bars (left axis): hit efficiency ε in acceptance for data (black), MC before (red), MC after emulation (blue), per epoch. Right axis, %: emulated − data as observed (diamonds), and as expected from the kill maps alone, with the floor 0.2 used in this run (orange tick) and with the new default floor 0 (green tick). 2023_preBPix: the emulation output was not copied.*
+*Bars (left axis): hit efficiency ε in acceptance for data (black), MC before (red), MC after emulation (blue), per epoch. Right axis, %: emulated − data as observed (diamonds), and as expected from the kill maps alone, with the floor 0.2 used in this run (orange tick) and with the new default floor 0 (green tick). Since the rerun all seven epochs are in.*
 
 - Everywhere except 2024 D1−, emulated − data is between −0.04% and −0.30%.
 - **Early epochs (2022–2023):** observed ≈ orange tick. The residual is the old floor 0.2 on w_nohit (section 9.9). Without the floor (green) it nearly vanishes. **Fixed** by the default `--min-weight 0` (#11).
@@ -1092,9 +1092,9 @@ This is the missing L2/L3 (and D2) emulation of section 9.2, now seen in every e
    - optionally the selection-loss weight of 10.4 (#4).
 7. **Route B per-track V** (#9), only if route A turns out insufficient.
 
-### 10.13 Route A on real data (rerun of 8 October, 2022–2024)
+### 10.13 Route A on real data (rerun of 8 October, all seven epochs)
 
-*Same kill maps and no-L1 outputs as on 7 October (identical files); the emulation rerun with the trained flows of `run3_epochs_05oct26_trgmatch_e1200`. 2025–2026 were still running. Route B: no hit-error fit in 2022_preEE and 2023_postBPix, so there route A alone.*
+*Same kill maps and no-L1 outputs as on 7 October (identical files); the emulation rerun with the trained flows of `run3_epochs_05oct26_trgmatch_e1200`, all seven epochs (summary: `OK_AB` everywhere except 2022_preEE and 2023_postBPix, `OK_A_noB`: no hit-error fit for route B there). The whole chain took 4 h 10 min, of which the 2024–2026 MC passes with the flows on CPU ~1 h.*
 
 ![route A per epoch](docs/hitemu_figs/e10_routeA_epochs.png)
 
@@ -1109,8 +1109,10 @@ This is the missing L2/L3 (and D2) emulation of section 9.2, now seen in every e
 | 2023_preBPix | +0.004 / +0.009 (0.009) | +0.001 / +0.001 (0.005) | −0.260 |
 | 2023_postBPix | −0.001 / +0.019 (0.029) | +0.002 / +0.002 (0.007) | −0.294 |
 | 2024 | **−0.008 / −0.004 (0.022)** | −0.002 / −0.001 (0.005) | −0.233 |
+| 2025 | **−0.010 / −0.002 (0.027)** | −0.006 / −0.002 (0.018) | −0.242 |
+| 2026 | **−0.003 / −0.001 (0.010)** | −0.002 / +0.001 (0.006) | −0.265 |
 
-- From a 40–50% too small σ(dxy) to within 2% (6% at most in 2022, where the dead-cell target has only 600–14k tracks).
+- From a 40–50% too small σ(dxy) to within 2% (6% at most in 2022, where the dead-cell target has only 600–14k tracks). **2026, the year with the most L1 loss (36% of the MC L1 hits removed), closes best: −0.003.**
 - The right column is expected to close: covflow was trained on data muons without L1, so f_data at that context reproduces them. **The left column is the real test.** Muons that lost L1 in a dead module are a population covflow never singled out, and route A reproduces them too. That is the mixture test (section 6) passing at the level of the full covariance.
 - The beam-spot IP significance, with the parameters smeared by N(0, C′ − C), matches data over three orders of magnitude (2024):
 
@@ -1122,28 +1124,40 @@ This is the missing L2/L3 (and D2) emulation of section 9.2, now seen in every e
 
 *Real page, 2024: beam-spot IP significance of the muons without L1. Route A (green) follows data (black) out to 40σ; MC before and both route B variants have tails 3–6× too high.*
 
-**D1.** Against all data muons without D1, route A is within +0.02 everywhere. Against "dead cells" it is +0.03 to +0.10 in 2022–2023, and +0.001 in 2024. In 2022–2023 that target is the disk's outer ring, not dead modules (section 10.10): those tracks physically miss the disk. The page shows it: route A (green) lies on "all without D1" (dotted), the "dead-cell" histogram (black) is the odd one out.
+**D1.** Against all data muons without D1, route A is within +0.03 everywhere (2025: +0.009; 2026: +0.014 dxy, +0.026 dsz). Against "dead cells" it is +0.03 to +0.10 in 2022–2023, +0.001 in 2024, +0.009 in 2025 and +0.018 / +0.029 in 2026. In 2025–2026 the MC before is −0.17 to −0.24, so route A removes ~90% of it; what is left in 2026 sits in the high-σ shoulder (muons that lost D1 and rely on few other hits), slightly too populated in route A (page below). The 2022–2023 dead-cell numbers are the outer-ring artefact: In 2022–2023 that target is the disk's outer ring, not dead modules (section 10.10): those tracks physically miss the disk. The page shows it: route A (green) lies on "all without D1" (dotted), the "dead-cell" histogram (black) is the odd one out.
 
 ![2023 D1](docs/hitemu_figs/r15_2023preBPix_D1_routes.png)
 
 *Real page, 2023_preBPix, muons that lost D1.*
+
+![2026 D1](docs/hitemu_figs/r18_2026_D1_routes.png)
+
+*Real page, 2026, muons that lost D1. Route A (green) follows the data target (black) from −0.24 MC-before; the shoulder at log10 σ(dxy) ≈ −2.1 is a little too high.*
 
 Since 8 October the dead-cell target in `emulate_hit_loss.py` uses the same rule as the no-L1 study: the cell must work in MC (`--dead-any-mc` for the old behaviour).
 
 **Route B is dropped.**
 
 - **B, raw** (hit removed with fitted errors) moves σ(dxy) by 0.02–0.03 out of 0.23–0.30. It does not even close on MC's own muons without L1 (−0.15 to −0.22).
-- **B, final** (B, raw, then covflow) is worse than doing nothing in 2024: −0.52 in dxy. Only 35% of the tracks get a larger σ(dxy), and 26% end at the lower edge of the histogram. The reason: B, raw produces covariances that the MC flow never saw at that context (off the MC distribution), and f_MC maps them to extreme latent values.
+- **B, final** (B, raw, then covflow) is worse than doing nothing in 2024 (−0.52 in dxy) and 2026 (−0.79). In 2024 only 35% of the tracks get a larger σ(dxy), and 26% end at the lower edge of the histogram; in 2026 there are spikes at both edges of σ(q/p), σ(dxy) and σ(dsz) (page below). The reason: B, raw produces covariances that the MC flow never saw at that context (off the MC distribution), and f_MC maps them to extreme latent values.
 
 ![A vs B](docs/hitemu_figs/r14_2024_L1_AvsB.png)
 
 *Real page, 2024: route A against route B, final, track by track. No correlation: route B final is noise around route A.*
 
+![2026 L1](docs/hitemu_figs/r16_2026_L1_routes.png)
+
+*Real page, 2026, muons that lost L1. Route A (green) on the target (black) in all five parameters; route B final (orange, solid) piles up at the histogram edges.*
+
+![2026 IP significance](docs/hitemu_figs/r17_2026_L1_ipsig.png)
+
+*Real page, 2026: beam-spot IP significance of the muons without L1. Route A follows data; the others have tails several times too high.*
+
 This settles item 9 of section 10.0 differently than planned: there is no need to rescue route B. It stays in the code as a diagnostic.
 
 **Route A, diagnostics.**
 
-- "not PD": for 97% of the L1 tracks, C′_A − C has a small negative eigenvalue (median −0.6% of the largest). For D1, 85–94%, and the negative part is larger (median −5% to −37%). Only 54–86% of the D1 tracks get a larger σ(dxy).
+- "not PD": for 97% of the L1 tracks in every epoch, C′_A − C has a small negative eigenvalue (median −0.6% of the largest). For D1 in 2022–2024, 85–94%, and the negative part is larger (median −5% to −37%); only 54–86% of the D1 tracks get a larger σ(dxy). In 2025–2026, where losing D1 changes more, it is better: 71–75% not PD with median −0.5% to −0.8%, and 98–99% of the D1 tracks get a larger σ(dxy).
 - Why: C′_A contains **two** changes, the hit loss and the covflow MC→data correction itself. The second can shrink σ in some directions, and for D1 it is as large as the hit loss (removing a D1 hit changes little).
 - This only matters for the smearing of the track parameters: δ ~ N(0, C′ − C) should come from the hit loss alone.
 
