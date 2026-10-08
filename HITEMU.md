@@ -1169,7 +1169,7 @@ The second line is identical to route A by construction: f_MC(C′_MC; c′) = f
    - `{mu}_pix_hit_count`: valid hits per layer, 2 bits per layer.
 
    Bits 0–3 are BPix L1–L4, bits 4–6 FPix D1–D3. They need a new ntuple production (dimuon at least); the kill maps and the emulation are then extended to all seven surfaces.
-2. **Two hits on one layer** (module overlaps) count as one when killed: for those tracks n_pix stays 1 too high.
+2. **Two hits on one layer** (module overlaps) are common: 22–24% of the muons in the first Bmmm test with the masks (Summer24 MC, 8 Oct 2026). Without the masks a kill removed only one of them, leaving n_pix 1 too high. **Solved with the masks:** `{mu}_pix_hit_count` gives the hits per layer, and a kill removes all of them (`layer_count` in `hitemu.py`). Same test: Σ of the per-layer counts equals `n_pix_hit` for 99.94% (mu1) and 100% (mu2) of the muons; 4.6% have a crossed layer without a hit, 9–10% cross an inactive module.
 3. **Tracks left with ≤ 2 pixel hits are kept.** Checked on full 2026 (section 9.7): data has even more of them (10.8% against 9.6%; no pixel hit 0.54% against 0.11%), so keeping them is right.
 4. **MC share per run range** = share of selected data events, which includes trigger and selection efficiency. `--lumi-csv` takes the brilcalc recorded luminosity instead.
 5. **Uncorrectable cells** (MC dead where data works) cannot be emulated by removing hits. In 2026 they are mostly the D1+ outer edge, where data's disk extends ~1.5 mm further than MC's (section 9.6). With cap 1.5 they leave 0.9% of the D1+ efficiency missing; with the new default cap 3, 0.4%, at the price of weights up to 3 on those few tracks. Inside the nominal acceptance it is below 0.2% on every surface.
