@@ -82,6 +82,17 @@ def parse_args():
                    help="quantile bins per context dimension for the binned "
                         "closure test: an int for all dims, or a comma list "
                         "like '4,3,1'. '0' disables the binned closure.")
+    p.add_argument("--context-edges", nargs="*", default=[],
+                   metavar="BRANCH=E1,E2,...",
+                   help="explicit inner bin edges for a context variable, "
+                        "replacing its quantile edges in EVERY context "
+                        "binning (closure, reweighting, binned plots, "
+                        "context.pdf). BRANCH is spelled as in --context; its "
+                        "entry in the *-bins options is then ignored. Meant "
+                        "for discrete variables dominated by one value, e.g. "
+                        "'mu1_pix_first_b_layer=0.5,1.5,2.5' -> cells {0}, "
+                        "{1}, {2}, {3,4}. Quantile edges would collapse onto "
+                        "the dominant value and merge every other category.")
     p.add_argument("--closure-min-count", type=int, default=400,
                    help="skip context cells with fewer entries than this")
     p.add_argument("--plot-bins", default="3,3",
@@ -386,6 +397,50 @@ def _expand(globs):
     return files
 
 
+def _context_edges(a, context_branches):
+    """
+    --context-edges -> {context dim index: inner edges}, fail-loud.
+
+    Resolved against the branch names as given to --context, so the mapping
+    cannot silently shift if the context order changes. The --log-pt branch is
+    refused: its context column is log(pt), and edges written in GeV there
+    would be applied in log space without a word.
+    """
+    out = {}
+    for item in a.context_edges or []:
+        name, sep, vals = item.partition("=")
+        name = name.strip()
+        if not sep or not name or not vals.strip():
+            raise SystemExit(f"--context-edges {item!r}: expected "
+                             f"BRANCH=E1,E2,...")
+        if name not in context_branches:
+            raise SystemExit(f"--context-edges names {name!r}, which is not "
+                             f"in --context {list(context_branches)}")
+        if a.log_pt and name == a.log_pt:
+            raise SystemExit(f"--context-edges on the --log-pt branch {name!r} "
+                             f"is refused: that column holds log(pt), not pt")
+        try:
+            e = [float(v) for v in vals.replace(" ", "").split(",") if v]
+        except ValueError:
+            raise SystemExit(f"--context-edges {item!r}: edges must be numbers")
+        if not e or not np.all(np.isfinite(e)) or np.any(np.diff(e) <= 0):
+            raise SystemExit(f"--context-edges {item!r}: need one or more "
+                             f"finite, strictly increasing edges")
+        d = list(context_branches).index(name)
+        if d in out:
+            raise SystemExit(f"--context-edges gives {name!r} twice")
+        out[d] = e
+    return out
+
+
+def _note_fixed(label, nb, fixed, names):
+    """Say once, per binning, which dimensions ignore their *-bins entry."""
+    for d, e in sorted(fixed.items()):
+        if nb[d] != len(e) + 1:
+            print(f"[validate] {label}: {names[d]} uses the {len(e) + 1} cells "
+                  f"of --context-edges, not the {nb[d]} quantile bins asked")
+
+
 def _and(*parts):
     """AND of the non-empty selection strings, each parenthesised."""
     parts = [x for x in parts if x and x.strip()]
@@ -583,6 +638,10 @@ def main():
               f"--keep-negative-weights")
     print(f"[load] MC {len(mc):,} tracks, data {len(dat):,} tracks, "
           f"context = {mc.context_names}")
+    fixed_edges = _context_edges(
+        a, mc.context_names if a.synthetic else list(a.context))
+    for d, e in sorted(fixed_edges.items()):
+        print(f"[load] context {mc.context_names[d]}: fixed bin edges {e}")
 
     # ---- null test: replace (mc, data) by two halves of one sample --------
     if a.null_test:
@@ -618,9 +677,11 @@ def main():
                              f"{mc.C.shape[1]} context dimensions")
         print("[validate] context spectra")
         try:
+            _note_fixed("context plots", cnb, fixed_edges, mc.context_names)
             context_report = V.plot_context(
                 mc.C, mc.w, dat.C, dat.w, mc.context_names,
-                path=os.path.join(a.out, "context.pdf"), n_bins=cnb)
+                path=os.path.join(a.out, "context.pdf"), n_bins=cnb,
+                fixed_edges=fixed_edges)
             for nm, s in context_report["per_variable"].items():
                 print(f"[context] {nm:<22s} data {s['data_mean']:+.4f} +- "
                       f"{s['data_std']:.4f}   MC {s['mc_mean']:+.4f} +- "
@@ -862,8 +923,11 @@ def main():
     if max(nb) > 1:
         Cpool = np.concatenate([mc.C, dat.C], 0)
         wpool = np.concatenate([mc.w, dat.w], 0)
-        edges = V.context_bin_edges(Cpool, wpool, nb)
+        _note_fixed("closure", nb, fixed_edges, mc.context_names)
+        edges = V.context_bin_edges(Cpool, wpool, nb, fixed=fixed_edges)
         rep["closure_bins"] = nb
+        rep["context_edges"] = {mc.context_names[d]: e
+                                for d, e in sorted(fixed_edges.items())}
         rep["context_names"] = mc.context_names
 
         # (a) context reweighting -> one confound-free global number
@@ -876,7 +940,8 @@ def main():
                 raise SystemExit(f"--reweight-bins gave {len(rnb)} values for "
                                  f"{mc.C.shape[1]} context dimensions")
             redges = (edges if rnb == list(nb)
-                      else V.context_bin_edges(Cpool, wpool, rnb))
+                      else V.context_bin_edges(Cpool, wpool, rnb,
+                                               fixed=fixed_edges))
             print(f"[validate] context-reweighted closure (bins {rnb})")
             rep["reweight_bins"] = rnb
             w_rw, rwinfo = V.context_weights(mc.C, mc.w, dat.C, dat.w, redges)
@@ -926,7 +991,11 @@ def main():
             pnb = [int(v) for v in str(a.plot_bins).replace(",", " ").split()]
             if len(pnb) == 1:
                 pnb = pnb * mc.C.shape[1]
-            pedges = V.context_bin_edges(Cpool, wpool, pnb)
+            if len(pnb) != mc.C.shape[1]:
+                raise SystemExit(f"--plot-bins gave {len(pnb)} values for "
+                                 f"{mc.C.shape[1]} context dimensions")
+            _note_fixed("binned plots", pnb, fixed_edges, mc.context_names)
+            pedges = V.context_bin_edges(Cpool, wpool, pnb, fixed=fixed_edges)
             print(f"[validate] binned marginal plots ({int(np.prod([len(e)-1 for e in pedges]))} cells)")
             try:
                 V.plot_binned_marginals(

@@ -75,6 +75,13 @@ JOB_SCRATCH="/scratch/${USER}/${SLURM_JOB_ID}"
 mkdir -p "${JOB_SCRATCH}"
 export TMPDIR="${JOB_SCRATCH}"
 
+# Removed on ANY exit, not only on success. It used to be deleted only at the
+# very end, so a failed job left its scratch behind; with staged inputs that
+# is up to ~16 GB per job on a node shared by the other GPU jobs. Everything
+# in it is either a copy (staged inputs, proxy) or a temporary: the run's
+# products go to COVFLOW_OUT_BASE, never here.
+trap 'rm -rf "${JOB_SCRATCH}"' EXIT
+
 # ------------------------------------------------------------
 # Conda
 # ------------------------------------------------------------
@@ -297,13 +304,119 @@ if [[ "${COVFLOW_MIN_MEM}" != "0" ]]; then
 fi
 
 # ------------------------------------------------------------
+# Inputs: file lists, optionally staged to local scratch
+# ------------------------------------------------------------
+#
+# COVFLOW_DATA / COVFLOW_MC may be plain strings (a path or a glob, as in the
+# hand-written configs) or bash arrays of paths (as written by
+# batch/submit_run3_epochs.py). "${X[@]}" yields the single element for a
+# string, so both forms take the same path below.
+#
+# COVFLOW_STAGE=1: the worker nodes do not mount /pnfs, so every input is
+# copied to ${JOB_SCRATCH}/inputs with xrdcp through the PSI door, exactly as
+# the Bmmm ntuple jobs read them (root://<door>//pnfs/...), using a private
+# copy of the grid proxy. train_covflow.py expands its inputs with glob.glob,
+# which returns nothing for a root:// URL, so reading remotely is not an option
+# without a code change -- and every file is read end to end anyway
+# (--max-events is a reservoir over the whole stream), so a copy costs no more
+# I/O than a remote read.
+
+DATA_FILES=("${COVFLOW_DATA[@]}")
+MC_FILES=("${COVFLOW_MC[@]}")
+
+if [[ "${COVFLOW_STAGE:-0}" == "1" ]]; then
+    COVFLOW_SE_HOST="${COVFLOW_SE_HOST:-t3dcachedb03.psi.ch:1094}"
+    STAGE_DIR="${JOB_SCRATCH}/inputs"
+
+    echo
+    echo "Staging inputs to ${STAGE_DIR} via root://${COVFLOW_SE_HOST}"
+
+    if ! command -v xrdcp >/dev/null 2>&1; then
+        echo "ERROR: xrdcp not found on $(hostname) (PATH=${PATH})."
+        exit 4
+    fi
+
+    if [[ -z "${X509_USER_PROXY:-}" || ! -f "${X509_USER_PROXY}" ]]; then
+        echo "ERROR: X509_USER_PROXY is unset or missing on this node:"
+        echo "  '${X509_USER_PROXY:-}'"
+        echo "  Create it on a shared filesystem before submitting, e.g."
+        echo "    voms-proxy-init --voms cms --valid 192:00 --out \$HOME/.x509up_u\$(id -u)"
+        echo "    export X509_USER_PROXY=\$HOME/.x509up_u\$(id -u)"
+        exit 4
+    fi
+    PROXY_COPY="${JOB_SCRATCH}/x509proxy"
+    cp "${X509_USER_PROXY}" "${PROXY_COPY}"
+    chmod 600 "${PROXY_COPY}"
+    export X509_USER_PROXY="${PROXY_COPY}"
+
+    # Free space, against the byte count the submitter measured on /pnfs.
+    # Two jobs of the same epoch (mu1, mu2) can land on the same node, so the
+    # check is against what is free NOW, with a 10% margin.
+    if [[ -n "${COVFLOW_STAGE_BYTES:-}" ]]; then
+        AVAIL=$(df --output=avail -B1 "${JOB_SCRATCH}" | tail -1 | tr -d ' ')
+        NEED=$(( COVFLOW_STAGE_BYTES + COVFLOW_STAGE_BYTES / 10 ))
+        echo "  need   : $(( NEED / 1024 / 1024 )) MB (inputs + 10%)"
+        echo "  free   : $(( AVAIL / 1024 / 1024 )) MB on $(df --output=target "${JOB_SCRATCH}" | tail -1)"
+        if (( AVAIL < NEED )); then
+            echo "ERROR: not enough space on local scratch to stage the inputs."
+            exit 4
+        fi
+    fi
+
+    # _stage <subdir> <path>... : copies into ${STAGE_DIR}/<subdir> and
+    # leaves the local paths in STAGED, in the input order.
+    _stage() {
+        local sub="$1"; shift
+        local n=$# i=0 f dst t0 try ok
+        mkdir -p "${STAGE_DIR}/${sub}"
+        STAGED=()
+        for f in "$@"; do
+            i=$(( i + 1 ))
+            if [[ "${f}" != /pnfs/* ]]; then
+                echo "ERROR: cannot stage '${f}': only /pnfs paths are staged."
+                exit 4
+            fi
+            dst="${STAGE_DIR}/${sub}/$(basename "${f}")"
+            if [[ -e "${dst}" ]]; then
+                echo "ERROR: two ${sub} inputs share the file name $(basename "${f}")."
+                exit 4
+            fi
+            t0=${SECONDS}
+            ok=0
+            for try in 1 2 3; do
+                if xrdcp --nopbar --silent "root://${COVFLOW_SE_HOST}/${f}" "${dst}"; then
+                    ok=1
+                    break
+                fi
+                echo "  [stage] attempt ${try} failed for $(basename "${f}"), retrying"
+                rm -f "${dst}"
+                sleep $(( 10 * try ))
+            done
+            if (( ! ok )); then
+                echo "ERROR: xrdcp failed 3 times for root://${COVFLOW_SE_HOST}/${f}"
+                exit 4
+            fi
+            printf '  [stage] %-4s %2d/%-2d %-45s %6d MB  %4d s\n' \
+                "${sub}" "${i}" "${n}" "$(basename "${f}")" \
+                "$(( $(stat -c %s "${dst}") / 1024 / 1024 ))" "$(( SECONDS - t0 ))"
+            STAGED+=("${dst}")
+        done
+    }
+
+    _stage data "${DATA_FILES[@]}"
+    DATA_FILES=("${STAGED[@]}")
+    _stage mc "${MC_FILES[@]}"
+    MC_FILES=("${STAGED[@]}")
+fi
+
+# ------------------------------------------------------------
 # Build command
 # ------------------------------------------------------------
 
 CMD=(
     python train_covflow.py
-    --data "${COVFLOW_DATA}"
-    --mc "${COVFLOW_MC}"
+    --data "${DATA_FILES[@]}"
+    --mc "${MC_FILES[@]}"
     --tree "${COVFLOW_TREE}"
     --cov-prefix "${COVFLOW_COV_PREFIX}"
     --context ${COVFLOW_CONTEXT}
@@ -337,8 +450,11 @@ echo "============================================================"
 echo "Training configuration"
 echo "============================================================"
 echo "config     : ${CONFIG}"
-echo "data       : ${COVFLOW_DATA}"
-echo "mc         : ${COVFLOW_MC}"
+echo "data       : ${#DATA_FILES[@]} file(s)"
+printf '               %s\n' "${DATA_FILES[@]}"
+echo "mc         : ${#MC_FILES[@]} file(s)"
+printf '               %s\n' "${MC_FILES[@]}"
+echo "mc weight  : ${COVFLOW_MC_WEIGHT:-<none>}"
 echo "tree       : ${COVFLOW_TREE}"
 echo "cov-prefix : ${COVFLOW_COV_PREFIX}"
 echo "context    : ${COVFLOW_CONTEXT}"
@@ -371,5 +487,4 @@ echo "Training finished successfully"
 echo "output : ${OUT}"
 echo "date   : $(date)"
 echo "============================================================"
-
-rm -rf "${JOB_SCRATCH}"
+# ${JOB_SCRATCH} is removed by the EXIT trap set where it was created.

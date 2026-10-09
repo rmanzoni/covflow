@@ -60,6 +60,32 @@ COVFLOW_SEEDS=("${COVFLOW_SEEDS[@]:-0}")
 COVFLOW_TIME="${COVFLOW_TIME:-8:00:00}"
 COVFLOW_MEM="${COVFLOW_MEM:-64G}"
 
+# Staged inputs are read through xrootd with the grid proxy, at the START of
+# the job -- which on the gpu partition can be a long time after submission.
+# Check here, where a failure costs nothing, that the proxy exists, is on a
+# filesystem the worker nodes see, and will still be valid by then.
+if [[ "${COVFLOW_STAGE:-0}" == "1" ]]; then
+    COVFLOW_PROXY_MIN_VALID="${COVFLOW_PROXY_MIN_VALID:-48:00}"
+    if [[ -z "${X509_USER_PROXY:-}" || ! -f "${X509_USER_PROXY}" ]]; then
+        echo "ERROR: COVFLOW_STAGE=1 needs a grid proxy, and X509_USER_PROXY is"
+        echo "       unset or points to a missing file. Create one with"
+        echo "  voms-proxy-init --voms cms --valid 192:00 --out \$HOME/.x509up_u\$(id -u)"
+        echo "  export X509_USER_PROXY=\$HOME/.x509up_u\$(id -u)"
+        exit 1
+    fi
+    if [[ "${X509_USER_PROXY}" == /tmp/* ]]; then
+        echo "ERROR: X509_USER_PROXY=${X509_USER_PROXY} is node-local; the worker"
+        echo "       nodes cannot read it. Put it on a shared filesystem (see above)."
+        exit 1
+    fi
+    if ! voms-proxy-info -exists -valid "${COVFLOW_PROXY_MIN_VALID}" >/dev/null 2>&1; then
+        echo "ERROR: grid proxy missing or valid for less than ${COVFLOW_PROXY_MIN_VALID}"
+        echo "       (HH:MM, COVFLOW_PROXY_MIN_VALID). Renew it:"
+        echo "  voms-proxy-init --voms cms --valid 192:00 --out ${X509_USER_PROXY}"
+        exit 1
+    fi
+fi
+
 mkdir -p "${COVFLOW_OUT_BASE}"
 
 SEED_FILE="${COVFLOW_OUT_BASE}/seed_list.txt"
@@ -98,8 +124,12 @@ echo "Submitting CovFlow GPU training"
 echo "============================================================"
 echo "config : ${CONFIG}"
 echo "repo   : ${COVFLOW_REPO}"
-echo "data   : ${COVFLOW_DATA}"
-echo "mc     : ${COVFLOW_MC}"
+# COVFLOW_DATA / COVFLOW_MC may be a string (path or glob) or an array.
+echo "data   : ${#COVFLOW_DATA[@]} entr$( (( ${#COVFLOW_DATA[@]} == 1 )) && echo y || echo ies)"
+printf '           %s\n' "${COVFLOW_DATA[@]}"
+echo "mc     : ${#COVFLOW_MC[@]} entr$( (( ${#COVFLOW_MC[@]} == 1 )) && echo y || echo ies)"
+printf '           %s\n' "${COVFLOW_MC[@]}"
+echo "stage  : $( [[ "${COVFLOW_STAGE:-0}" == "1" ]] && echo "yes, via root://${COVFLOW_SE_HOST:-t3dcachedb03.psi.ch:1094}" || echo no)"
 echo "output : ${COVFLOW_OUT_BASE}"
 echo "seeds  : ${COVFLOW_SEEDS[*]}"
 echo "time   : ${COVFLOW_TIME}"

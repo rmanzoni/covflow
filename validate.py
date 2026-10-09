@@ -267,19 +267,41 @@ def run(packed_mc, C_mc, w_mc,
 # The second gives one clean number; the first shows where it works and where
 # it does not.
 
-def context_bin_edges(C_pool, w_pool=None, n_bins=4):
+def context_bin_edges(C_pool, w_pool=None, n_bins=4, fixed=None):
     """
     Quantile edges per context dimension, from the POOLED sample so that data
     and MC land in the same cells. n_bins may be an int (same for every
     dimension) or a per-dimension sequence.
+
+    fixed : {dim: inner_edges}, optional. For those dimensions the given inner
+            edges replace the quantile ones (-inf/+inf are added), and the
+            n_bins entry of that dimension is ignored.
+
+    WHY `fixed` EXISTS. Quantile edges are the right default for continuous
+    variables and the wrong one for a discrete variable dominated by one value.
+    The duplicate edges collapse onto that value, and every other category is
+    merged into one cell: with BPix L1 as the innermost hit of most tracks,
+    4 quantile bins of pix_first_b_layer give {0} and {1,2,3,4}, so the
+    closure cannot see the L2-first tracks behind dead L1 modules at all --
+    precisely the population where data and MC are expected to differ.
+    Categorical edges at half-integers keep each category in its own cell.
     """
     C_pool = np.asarray(C_pool, float)
     k = C_pool.shape[1]
     nb = [n_bins] * k if np.isscalar(n_bins) else list(n_bins)
     if len(nb) != k:
         raise ValueError(f"n_bins has {len(nb)} entries for {k} context dims")
+    fixed = dict(fixed or {})
+    bad = [d for d in fixed if not 0 <= int(d) < k]
+    if bad:
+        raise ValueError(f"fixed edges given for context dim(s) {bad}, "
+                         f"but there are only {k}")
     edges = []
     for d in range(k):
+        if d in fixed:
+            inner = np.asarray(fixed[d], float)
+            edges.append(np.concatenate([[-np.inf], inner, [np.inf]]))
+            continue
         n = max(int(nb[d]), 1)
         if n == 1:
             edges.append(np.array([-np.inf, np.inf]))
@@ -721,7 +743,8 @@ def _whist(x, w, edges):
 
 
 def plot_context(C_mc, w_mc, C_data, w_data, context_names,
-                 path="context.pdf", n_bins=4, bins_1d=50, bins_2d=30):
+                 path="context.pdf", n_bins=4, bins_1d=50, bins_2d=30,
+                 fixed_edges=None):
     """
     Compare the CONTEXT spectra of data and MC: one dimension at a time, every
     pair, and the full k-dimensional cell occupancy.
@@ -743,6 +766,7 @@ def plot_context(C_mc, w_mc, C_data, w_data, context_names,
 
     `n_bins` is an int or a per-dimension sequence, and should normally be the
     closure binning so these numbers line up with `binned_closure`.
+    `fixed_edges` is passed to context_bin_edges, for the same reason.
 
     Returns the numbers as a dict; writes the PDF to `path`.
     """
@@ -794,7 +818,8 @@ def plot_context(C_mc, w_mc, C_data, w_data, context_names,
     if len(nb) != k:
         raise ValueError(f"n_bins has {len(nb)} entries for {k} context dims")
     edges_nd = context_bin_edges(np.concatenate([C_mc, C_data], 0),
-                                 np.concatenate([wm, wd]), nb)
+                                 np.concatenate([wm, wd]), nb,
+                                 fixed=fixed_edges)
     im, shape = assign_bins(C_mc, edges_nd)
     idd, _ = assign_bins(C_data, edges_nd)
     ncell = int(np.prod(shape))

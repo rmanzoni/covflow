@@ -96,3 +96,36 @@ The training script explicitly uses:
     --device cuda
 
 and aborts if PyTorch cannot see the GPU, preventing an accidental CPU run.
+
+## Run 3: one training per epoch and per muon
+
+`configs/run3_epochs.py` holds the MC <-> data map (one epoch = the data eras
+matched to one MC campaign, as in the PPD summary tables; 2024, 2025 and 2026
+are separate epochs that share Summer24 MC) and the training settings shared by
+every job. `batch/submit_run3_epochs.py` turns it into one Slurm array per
+(epoch, muon).
+
+On the UI, with the `covflow` env active and a proxy on a shared filesystem:
+
+    voms-proxy-init --voms cms --valid 192:00 --out $HOME/.x509up_u$(id -u)
+    export X509_USER_PROXY=$HOME/.x509up_u$(id -u)
+
+    python batch/submit_run3_epochs.py --dry-run      # checks, configs, no sbatch
+    python batch/submit_run3_epochs.py                # all 7 epochs x mu1, mu2
+    python batch/submit_run3_epochs.py --only 2024 --muons mu2
+
+Before anything is submitted it checks that every data file in the input
+directory belongs to exactly one epoch, that every file has every branch the
+job will read, and that each MC pileup-weight branch is filled for the year it
+serves. Each job gets a self-contained `job.conf` in
+`OUT_ROOT/TAG/<epoch>/<mu>/`, copied again into its `task_<n>` directory, and
+the submissions are recorded in `OUT_ROOT/TAG/submitted.json`.
+
+The worker nodes do not mount /pnfs. With `COVFLOW_STAGE=1` (set in every
+generated config) `train_gpu.sh` copies the inputs to `/scratch` with xrdcp
+through `COVFLOW_SE_HOST`, using a private copy of `X509_USER_PROXY`, after
+checking the free space against `COVFLOW_STAGE_BYTES`. The scratch directory is
+removed when the job exits, successfully or not.
+
+`COVFLOW_DATA` / `COVFLOW_MC` can now be bash arrays of paths as well as a
+single path or glob, so the hand-written configs keep working unchanged.
