@@ -114,10 +114,11 @@ BRANCHES = dict(
     n_pix='{mu}_n_pix_hit',         # covflow context
     first_b='{mu}_pix_first_b_layer',
     first_e='{mu}_pix_first_e_disk',
-    mask='{mu}_pix_valid_mask',     # does NOT exist yet; only for L2-4 / D2-3
+    mask='{mu}_pix_valid_mask',     # Bmmm TrackHitContent (Oct 2026); only for L2-4 / D2-3
+    count='{mu}_pix_hit_count',     # valid hits per layer, 2 bits each (optional)
     run='run',
 )
-OPTIONAL = {'charge', 'vx', 'vy'}
+OPTIONAL = {'charge', 'vx', 'vy', 'count'}
 
 MASK_BIT = {'L1': 0, 'L2': 1, 'L3': 2, 'L4': 3, 'D1': 4, 'D2': 5, 'D3': 6}
 SELECTION_FUNCS = {'abs': np.abs, 'sqrt': np.sqrt, 'log': np.log, 'exp': np.exp,
@@ -259,7 +260,7 @@ def branch_templates(a, surfaces):
     used = ['pt', 'eta', 'phi', 'charge', 'vx', 'vy', 'n_pix', 'first_b', 'first_e']
     used += ['vz'] if a.z0_from == 'vz' else ['dz', 'pv_z']
     if needs_mask:
-        used.append('mask')
+        used += ['mask', 'count']
     tmpl = {k: br[k] for k in used if br[k]}
     for k in used:
         if not br[k] and k not in OPTIONAL:
@@ -524,9 +525,10 @@ def muon_view(arr, mu, tmpl, z0_from, sel):
         v['z0'] = g('vz')
     else:
         v['z0'] = g('dz') + np.asarray(arr[tmpl['pv_z']], np.float64)[sel]
-    if 'mask' in tmpl:
-        m = g('mask')
-        v['mask'] = np.where(np.isfinite(m), m, 0).astype(np.int64)
+    for key in ('mask', 'count'):
+        if key in tmpl:
+            m = g(key)
+            v[key] = np.where(np.isfinite(m), m, 0).astype(np.int64)
     return v
 
 
@@ -540,7 +542,12 @@ def has_hit(v, surf, use_mask):
     raise RuntimeError('surface %s needs the hit mask' % surf.name)
 
 
-def other_hits(v, hit, use_mask):
+def other_hits(v, hit, use_mask, surf=None):
+    """Valid pixel hits besides those on the surface: n_pix minus the hits on
+    that layer (per-layer counts if present, as in hitemu), else n_pix - hit;
+    with the mask but without counts, the number of OTHER layers with a hit."""
+    if use_mask and 'count' in v and surf is not None:
+        return v['n_pix'] - ((v['count'] >> (2 * MASK_BIT[surf.base])) & 3)
     if use_mask:
         m = v['mask']
         nlay = np.zeros(m.shape, np.int64)
@@ -612,7 +619,7 @@ def process_sample(sample, files, info, tmpl, run_branch, a, surfaces, use_mask,
                 x, y = s.crossing(v, GEOM['B_FIELD'])
                 hit = has_hit(v, s, use_mask)
                 probe = (good & np.isfinite(x) & np.isfinite(y)
-                         & (other_hits(v, hit, use_mask) >= a.min_other_hits))
+                         & (other_hits(v, hit, use_mask, s) >= a.min_other_hits))
                 if not probe.any():
                     continue
                 xp, yp, wp, hp = x[probe], y[probe], w_ev[probe], hit[probe]

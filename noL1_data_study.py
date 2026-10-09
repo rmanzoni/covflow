@@ -14,6 +14,10 @@ efficiency of the cell they cross, taken from the kill maps:
                                                            emulation creates
 A "missing" L1 hit means first BPix layer == 2 (L2 present), and likewise
 first FPix disk == 2 for D1, so the three groups differ by one hit only.
+In data a D0 cell must also work in MC (eps_MC >= --eps-working): a loss of
+data only, the kind the emulation creates. Otherwise the D1 outer edge, where
+data and MC disks end at different radii, dominates D0 in 2022-2023
+(--d0-any-mc restores the old definition).
 For data the cell efficiency is that of the event's run range; for MC it is
 eps_MC.
 
@@ -66,6 +70,11 @@ def parse_args():
     p.add_argument('--sample', choices=('data', 'mc'), default='data')
     p.add_argument('--eps-working', type=float, default=0.95)
     p.add_argument('--eps-dead', type=float, default=0.4)
+    p.add_argument('--d0-any-mc', action='store_true',
+                   help='data: also count as D0 cells that are dead in MC too (geometric edges). '
+                        'Default: a data D0 cell must work in MC (eps_MC >= --eps-working), i.e. '
+                        'be a data-only loss, the kind the emulation removes. Without this, the '
+                        'D0 of 2022-2023 is ~95%% the D1 outer edge (r > 13.8 cm), not dead modules.')
     p.add_argument('--eta-edges', type=float, nargs='+',
                    default=[0.0, 0.5, 1.0, 1.5, 2.0, 2.5])
     p.add_argument('--fit-tracks', type=int, default=20000,
@@ -227,6 +236,7 @@ def main():
     tmpl, run_branch = H.resolve_branches(a, need_cov=True)
     is_mc = a.sample == 'mc'
     files = info['mc'] if is_mc else info['data']
+    tmpl = H.drop_missing_optional(tmpl, [info['data'], info['mc']], info['tree'], a.muons)
     sel_expr = H.selection_expr(info, is_mc)
     extra = ([info['mc_weight']] if (is_mc and info['mc_weight']) else []) + \
             ([] if is_mc else [run_branch])
@@ -262,11 +272,15 @@ def main():
                 eps = np.full(len(good), np.nan)
                 cell_par = np.zeros(len(good), np.int64)
                 which = np.full(len(good), '', dtype=object)
+                mc_ok = np.ones(len(good), bool)
                 for s in surfs:
                     x, y = H.cross_view(s, v)
                     ix, iy, ok = km.lookup(s, x, y)
                     ok &= good
                     e = km.eps_m[s][ix, iy] if is_mc else km.eps_d[s][rix, ix, iy]
+                    if not is_mc:
+                        mc_alive = np.nan_to_num(km.eps_m[s][ix, iy]) >= a.eps_working
+                        mc_ok = np.where(ok, mc_alive, mc_ok)
                     eps = np.where(ok, e, eps)
                     cell_par = np.where(ok, iy % 2, cell_par)
                     which = np.where(ok, s, which)
@@ -275,7 +289,8 @@ def main():
                 npix = v['n_pix'] - hit
                 with np.errstate(invalid='ignore'):
                     work, dead = eps >= a.eps_working, eps <= a.eps_dead
-                masks = dict(W1=work & hit, W0=work & ~hit & nxt, D0=dead & ~hit & nxt)
+                d0cell = dead if (is_mc or a.d0_any_mc) else dead & mc_ok   # data-only losses, not edges
+                masks = dict(W1=work & hit, W0=work & ~hit & nxt, D0=d0cell & ~hit & nxt)
                 counts[fam]['mid0'] += float(wev[~work & ~dead & np.isfinite(eps) & ~hit].sum())
                 counts[fam]['mid1'] += float(wev[~work & ~dead & np.isfinite(eps) & hit].sum())
                 M = None

@@ -50,7 +50,7 @@ def parse_args():
                    help='phi bins of the kill maps (default %(default)s: about two '
                         'per L1 ROC row)')
     p.add_argument('--nbins-r', type=int, default=20)
-    p.add_argument('--max-ranges', type=int, default=8)
+    p.add_argument('--max-ranges', type=int, default=10)
     p.add_argument('--min-cell-probes', type=float, default=40.,
                    help='a run range must hold on average this many L1 probes per '
                         'cell in acceptance (sets the minimum range size)')
@@ -61,9 +61,12 @@ def parse_args():
     p.add_argument('--prior', type=float, default=0.0,
                    help='pseudo-probes pulling sparse data cells toward eps_MC '
                         '(default %(default)s = off)')
-    p.add_argument('--min-weight', type=float, default=0.2,
-                   help='floor of the weight of MC tracks without the hit in cells '
-                        'where data is more efficient (default %(default)s)')
+    p.add_argument('--min-weight', type=float, default=0.0,
+                   help='floor of the weight (1-eps_data)/(1-eps_MC) of MC tracks '
+                        'without the hit in cells where data is more efficient '
+                        '(default %(default)s = no floor; it was 0.2 until Oct 2026: '
+                        'a floor biases the emulated efficiency low wherever data and '
+                        'MC are both ~0.99, by ~0.1-0.2%% per surface)')
     p.add_argument('--max-weight', type=float, default=3.0,
                    help='cells where eps_data/eps_MC exceeds this cannot be '
                         'emulated (MC has (almost) no hits there) and are left '
@@ -74,6 +77,10 @@ def parse_args():
                         'mcshape = eps_MC of the cell x one data/MC factor per range '
                         '(default), average = data surface average (old behaviour, '
                         'biased low where MC has dead cells)')
+    p.add_argument('--surfaces', nargs='+', default=['auto'],
+                   help="surfaces to map: 'auto' (default: all ten with the per-layer "
+                        "hit masks in the ntuple, else L1 D1+ D1-), 'all', or a list "
+                        "such as L1 L2 D1+ D1-")
     p.add_argument('--lumi-csv', default=None,
                    help='brilcalc csv with recorded luminosity per run')
     p.add_argument('--out', default=None, help='default: killmaps_<epoch>')
@@ -82,12 +89,30 @@ def parse_args():
 
 
 def probes(v, s, a):
-    """Crossing, cell inputs and hit flag for the probes of surface s."""
+    """Crossing, cell inputs and hit flag for the probes of surface s. "Other
+    hits" excludes all the hits on the surface's layer (2 on module overlaps,
+    from the per-layer counts when the ntuple has them)."""
     x, y = H.cross_view(s, v)
     hit = H.has_hit(s, v).astype(np.float64)
     ok = H.good_track(v) & np.isfinite(x) & np.isfinite(y) \
-        & ((v['n_pix'] - hit) >= a.min_other_hits)
+        & (H.other_pixel_hits(s, v) >= a.min_other_hits)
     return x, y, hit, ok
+
+
+def choose_surfaces(req, tmpl):
+    if req == ['auto']:
+        return H.default_surfaces(tmpl)
+    if req == ['all']:
+        req = list(H.ALL_SURFACES)
+    bad = [s for s in req if s not in H.ALL_SURFACES]
+    if bad:
+        die('unknown surface(s) %s: use %s' % (bad, ' '.join(H.ALL_SURFACES)))
+    if any(s not in H.KILL_SURFACES for s in req) and not H.has_masks(tmpl):
+        die('surfaces beyond L1 / D1 need the per-layer hit masks '
+            '({mu}_pix_valid_mask, {mu}_pix_hit_count), not in these ntuples')
+    if 'L1' not in req or 'D1+' not in req or 'D1-' not in req:
+        die('L1, D1+ and D1- are always needed (they define the run ranges)')
+    return [s for s in H.ALL_SURFACES if s in req]
 
 
 def main():
@@ -95,6 +120,8 @@ def main():
     t0 = time.time()
     info = P.load_epoch(a)
     tmpl, run_branch = H.resolve_branches(a)
+    tmpl = H.drop_missing_optional(tmpl, [info['data'], info['mc']], info['tree'], a.muons)
+    surfaces = choose_surfaces(a.surfaces, tmpl)
     out = a.out or 'killmaps_%s' % a.epoch
     os.makedirs(out, exist_ok=True)
     stem = os.path.join(out, 'killmaps_%s' % a.epoch)
@@ -108,7 +135,9 @@ def main():
              info['mc_weight'] or 'none'))
     entries = P.preflight({'data': info['data'], 'mc': info['mc']}, info['tree'],
                           {'data': need_d, 'mc': need_m})
-    edges = {s: H.surface_edges(s, a.nbins_phi, a.nbins_r) for s in H.KILL_SURFACES}
+    print('surfaces : %s (%s)' % (' '.join(surfaces), 'per-layer hit masks' if H.has_masks(tmpl)
+                                    else 'no per-layer hit mask: L1 / D1 from the first-hit branches'))
+    edges = {s: H.surface_edges(s, a.nbins_phi, a.nbins_r) for s in surfaces}
 
     # ------------------------------------------------------------- pass 1
     print('\n[1/3] per-run efficiency (data)')
@@ -121,7 +150,7 @@ def main():
         acc[:, 0] = np.bincount(inv, minlength=len(ur))
         for mu in a.muons:
             v = H.muon_view(chunk, mu, tmpl, a, sel)
-            for s in H.KILL_SURFACES:
+            for s in ('L1', 'D1+', 'D1-'):
                 x, y, hit, ok = probes(v, s, a)
                 ok &= H.in_acceptance(s, x)
                 col = 1 if s == 'L1' else 3
@@ -177,7 +206,7 @@ def main():
         rng_idx = np.clip(np.searchsorted(first, run_ev, side='right') - 1, 0, R - 1)
         for mu in a.muons:
             v = H.muon_view(chunk, mu, tmpl, a, sel)
-            for s in H.KILL_SURFACES:
+            for s in surfaces:
                 x, y, hit, ok = probes(v, s, a)
                 ix, iy, inmap = H.cell_index(*edges[s], x, y)
                 ok &= inmap
@@ -204,7 +233,7 @@ def main():
             w = np.ones(int(sel.sum()))
         for mu in a.muons:
             v = H.muon_view(chunk, mu, tmpl, a, sel)
-            for s in H.KILL_SURFACES:
+            for s in surfaces:
                 x, y, hit, ok = probes(v, s, a)
                 ix, iy, inmap = H.cell_index(*edges[s], x, y)
                 ok &= inmap
@@ -226,7 +255,8 @@ def main():
                 per_run=dict(runs=runs.tolist(), events=tab[:, 0].tolist(),
                              L1_probes=tab[:, 1].tolist(), L1_hits=tab[:, 2].tolist(),
                              D1_probes=tab[:, 3].tolist(), D1_hits=tab[:, 4].tolist()))
-    km = H.KillMaps(H.KILL_SURFACES, edges, ranges, lumi, d_num, d_den,
+    meta['hit_masks'] = H.has_masks(tmpl)
+    km = H.KillMaps(list(surfaces), edges, ranges, lumi, d_num, d_den,
                     m['num'], m['den'], m['num2'], m['den2'], meta).finalise(a.min_cell,
                                                                             a.max_weight,
                                                                             a.prior,
@@ -301,6 +331,22 @@ def report_lines(km, runs, tab, segs, a):
                  'largest weight %.3f' % (s, frac, float(w.max())))
         L.append('     data probes in UNCORRECTABLE cells, all mapped cells incl. disk edges (eps_data/eps_MC > %.2f, MC '
                  'nearly dead): %.4f' % (km.max_weight, lost))
+    L += ['', 'PER-SURFACE SUMMARY: hit efficiency eps in nominal acceptance (data per run range, '
+          'MC on the data illumination of the range) and average P_kill',
+          '  surf   ' + ' '.join('%-21s' % ('range %d' % k) for k in range(len(km.ranges))),
+          '         ' + ' '.join('%-21s' % 'data / MC / kill' for _ in km.ranges)]
+    for s in km.surfaces:
+        xe, ye = km.edges[s]
+        acc = H.in_acceptance(s, 0.5 * (xe[1:] + xe[:-1]))
+        cols = []
+        for k in range(len(km.ranges)):
+            dd, dn = km.d_den[s][k][acc], km.d_num[s][k][acc]
+            em = np.nan_to_num(km.eps_m[s][acc])
+            pk = km.p_kill[s][k][acc]
+            tot = max(dd.sum(), 1e-300)
+            cols.append('%.3f / %.3f / %.3f' % (dn.sum() / tot, (em * dd).sum() / tot,
+                                                (pk * dd).sum() / tot))
+        L.append('  %-5s  %s' % (s, ' '.join('%-21s' % c for c in cols)))
     return L
 
 
@@ -354,7 +400,7 @@ def plot(km, runs, tab, segs, lines, stem, a):
                 a.epoch), fontsize=12)
             fig.tight_layout()
             book.add(fig, '%s_%s' % (s.replace('+', 'p').replace('-', 'm'), what))
-        fig = plt.figure(figsize=(18, 5.6) if s == 'L1' else (18, 6.2))
+        fig = plt.figure(figsize=(18, 5.6) if s[0] == 'L' else (18, 6.2))
         ed = km.lumi_avg_eps_data(s)
         P.draw_map(fig, (1, 3, 1), surf, ed, 'data hit efficiency eps_data, luminosity-weighted over ranges',
                    'viridis', 0, 1, 'hit efficiency, data (eps_data)')

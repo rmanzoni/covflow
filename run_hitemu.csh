@@ -33,7 +33,7 @@ set EPOCHS = (2022_preEE 2022_postEE 2023_preBPix 2023_postBPix 2024 2025 2026)
 # set RUNS   = /work/manzoni/correct_track_covariance/covflow-runs/run3_epochs_05oct26
 set RUNS   = /work/manzoni/correct_track_covariance/covflow-runs/run3_epochs_05oct26_trgmatch_e1200
 
-set WRITE_TREE = 0          # 1: also write emu/emu_<epoch>_routeB.root (large)
+set WRITE_TREE = 0          # 1: also write emu/emu_<epoch>_route<A|B>.root (large)
 
 # route B hit errors: the epoch's own MC fit, then its data fit, then these
 # (per surface, the first file with a fit is used). Useful for the early epochs,
