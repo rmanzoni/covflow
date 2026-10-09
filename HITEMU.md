@@ -4,7 +4,7 @@
 
 Figure names tell where a figure comes from:
 
-- **`f…`**: drawings, or plots made from real 2026 numbers;
+- **`f…`**: drawings, toys (f18–f20: route A and its smearing, made by `docs/hitemu_figs/make_f18_f20.py`), or plots made from real 2026 numbers;
 - **`r…`**: pages of the scripts' own PDFs, run on the **real 2026 data and Summer24 MC** (October 2026);
 - **`s…`**: pages produced on **synthetic** samples. Only two are left (the route A/B pages in section 7.4), because routes A and B have not been run on real data yet. They show what those pages look like, not CMS results;
 - **`e…`**: plots made from the outputs of the **per-epoch run of 7 October 2026** (all seven Run 3 epochs, section 10).
@@ -330,25 +330,157 @@ Removing the innermost hit lengthens the extrapolation from the first measuremen
 
 *Toy least-squares fit with multiple scattering (pixel + strip layers, η = 0). This shows the trend, not CMS numbers. σ(d_xy) roughly doubles when the track starts at L2 instead of L1, and triples at L3. So an MC track that lost L1 but kept its "with L1" covariance would be far too precise. And the muons that start at L3 / L4 form the tail of the IP-significance distribution.*
 
-An MC muon that lost its hit therefore needs a new covariance C′ (and its parameters must be smeared by δ ~ N(0, C′ − C), so that the residuals match the larger errors). Two independent ways to get C′:
+An MC muon that lost its hit therefore needs a new covariance, and its parameters must be smeared so that their scatter matches the larger errors (for route A, δ ~ N(0, C′_MC − C), section 7.2.5). Two independent ways to get the new covariance:
 
 ![routes](docs/hitemu_figs/f13_routes.png)
 
 ### 7.2 Route A: reuse the trained covflow flows
 
-covflow has two flows per epoch and muon:
+**In short.** For each MC muon that lost a hit (the kill of section 4 decides which, at random, track by track), route A does two things:
 
-- f_MC maps (MC covariance, context) to a Gaussian latent u;
-- f_data does the same for data.
+- **a new covariance, deterministic.** The muon keeps its rank among MC muons, but among those with the new hit pattern. Only the **MC flow** is used, forward with the old context and inverse with the new one. The result, C′_MC, is an MC-like covariance for "this track, had it lost its hit".
+- **a smearing, random.** The track parameters are shifted by δ ~ N(0, C′_MC − C): the extra scatter that a fit with one hit less really has.
 
-Route A sends the MC track through f_MC **with its original context** (it had L1), then back through f_data⁻¹ **with the new context** (first layer L2):
+After that the emulated MC is an ordinary MC sample, and the usual covflow (MC flow forward, data flow inverse, at the new context) is applied to it like to any other track. Together this gives the formula used on the slides, C′ = f_data⁻¹( f_MC(C; c) ; c′ ).
 
-&nbsp;&nbsp;&nbsp;&nbsp;C′ = f_data⁻¹( f_MC(C; c) ; c′ )
+#### 7.2.1 The objects
 
-In words: "the track that was at the 70th percentile of MC tracks with L1 becomes the 70th percentile of *data* tracks without L1". The output is already data-like, so covflow is not applied again.
+| symbol | what it is | where it lives |
+|---|---|---|
+| θ | the 5 track parameters (q/p, λ, φ, d_xy, d_sz) | ntuple |
+| C | their 5×5 covariance, from the fit with all hits | `{mu}_cov_*` |
+| y = φ(C) | the 9 flow features: 5 log σ, plus 4 atanh of the partial correlations kept by the r–φ / r–z blocks. φ is invertible, and every y gives a positive-definite C | `features.py` |
+| c | the context of the muon **as reconstructed**: pT, η, number of pixel hits, first BPix layer, first FPix disk | ntuple |
+| c′ | the context **after the kill**: pT and η unchanged; pixel hits minus the hits on the killed layer; first layer / disk moved to the next one that has a hit | `hitemu.emulate` |
+| f_MC(y; c) | the MC flow: a bijection between MC features and the latent space, trained on MC muons of all contexts | covflow run, `flow_mc` |
+| f_data(y; c) | the same, for data | covflow run, `flow_data` |
+| u | latent point, u ~ N(0, 1) in 9 dimensions | — |
 
-- Advantages: no detector model; uses what is already trained.
-- Requirements: f_data at context c′ must be trained on enough no-L1 data tracks (true in 2024–2026), and those must be the right target (section 6).
+Both flows are bijections **feature space ↔ latent space**, for every value of the context:
+
+- "forward" (y → u) is written f(y; c);
+- "inverse" (u → y) is written f⁻¹(u; c).
+
+For any context, f( f⁻¹(u; c) ; c ) = u: the inverse at a context undoes the forward **at the same context**. Everything below follows from this one identity.
+
+#### 7.2.2 The MC part: C → C′_MC, with the MC flow only
+
+&nbsp;&nbsp;&nbsp;&nbsp;u = f_MC( φ(C) ; c ) &nbsp;&nbsp;&nbsp;&nbsp; C′_MC = φ⁻¹( f_MC⁻¹( u ; c′ ) )
+
+The **MC ↔ latent bijection is used twice**: forward with the old context c, then inverse with the new context c′. The data flow plays no part in C′_MC. Code: `hitemu.CovFlow.morph_mc`.
+
+In one dimension, with log10 σ(d_xy) the only feature, a flow is the cumulative distribution followed by a fixed map to a Gaussian. "Forward at c, inverse at c′" then means:
+
+1. find the track's percentile among MC muons with context c;
+2. take the value at **the same percentile** among MC muons with context c′.
+
+A track more precise than 30% of the MC muons with an L1 hit becomes more precise than 30% of the MC muons without it.
+
+![route A in one dimension](docs/hitemu_figs/f18_routeA_quantile_1d.png)
+
+*Toy numbers, one feature.*
+
+- *Top: the latent Gaussian; the track sits at u = −0.52, the 30th percentile.*
+- *Middle and bottom: MC with the L1 hit (blue), MC without it (orange), data without it (green), as densities and as cumulative distributions.*
+- <i>Route A moves the track along the horizontal line at 0.30: first to the orange curve with the MC flow (C′_MC), then to the green one with the usual covflow (C′).</i>
+
+**Why the MC flow can do this at all.** f_MC was trained on MC muons of **all** contexts. About 6% of MC muons have no L1 hit for natural reasons (gaps between modules, the MC's own small inefficiency). So f_MC( · ; c′) already knows what the MC reconstruction gives for a muon without an L1 hit, at every pT and η. Route A borrows that knowledge: no detector model, no fit, no retraining.
+
+**What it assumes.** An MC muon that lost its hit at random (our kill) has the covariance distribution of MC muons that lack the hit for natural reasons, at the same (pT, η, hit pattern). This is the mixture test of sections 6 and 10.10, in its MC version: W0 (no hit in a working cell) against D0 (no hit in a dead cell) agree within 0.03 in log10 σ(d_xy) for L1.
+
+#### 7.2.3 Adding the data part: the usual covflow at c′
+
+The emulated MC tree carries C′_MC and the new context c′. Covflow, applied to it as to any MC track:
+
+&nbsp;&nbsp;&nbsp;&nbsp;C′ = φ⁻¹( f_data⁻¹( f_MC( φ(C′_MC) ; c′ ) ; c′ ) ) = φ⁻¹( f_data⁻¹( u ; c′ ) )
+
+The inner step collapses because f_MC( f_MC⁻¹(u; c′) ; c′ ) = u: covflow finds the **same latent point u**, and the data flow at c′ turns it into a data-like covariance. Two steps give **exactly** the one-step formula C′ = f_data⁻¹( f_MC(C; c) ; c′ ). The emulator computes both and checks the difference per track (`A_split`, logged as "covflow(A, MC part) vs route A"): |Δ log10 σ| ~ 10⁻⁷ on the synthetic sample.
+
+![route A chain](docs/hitemu_figs/f19_routeA_chain.png)
+
+*One latent point u per track. Orange: the MC part, written to the emulated tree. Green: the usual covflow at c′, which recovers the same u and gives the data-like C′.*
+
+Why split it, if the result is the same?
+
+- **The tree stays an MC.** Downstream, covflow treats the emulated MC like any other MC, with no special case for the killed muons.
+- **The two smearings stay separate** (section 7.2.5): one is certain physics, the other an open question.
+
+**One caveat: "the same percentile" in 9 dimensions.** In one dimension it is unique. In 9 dimensions it is defined by the flow's latent space, and a different, equally good flow could pair tracks slightly differently while giving the same distributions at c and at c′. So the pairing of each track is a modelling choice, not a measurement. What is tested is the population: the emulated MC muons that lost L1 against data muons in dead modules agree within −0.010 … +0.027 in log10 σ(d_xy) in all seven epochs, and in all five σ in 2026 (section 10.13).
+
+#### 7.2.4 Why smear at all
+
+Removing a hit does two things to a real track:
+
+1. its reported uncertainty grows (C → C_R);
+2. its fitted parameters really scatter more around the truth, because the fit has less information.
+
+The new covariance only gives the first. Stopping there would leave parameters with the precision of the full fit and the uncertainty of the reduced one: pulls too narrow (width 0.58 instead of 1 in the toy below).
+
+#### 7.2.5 The smearing is the difference of two covariances: δ ~ N(0, C′_MC − C)
+
+Fit one track twice: with all hits (θ, covariance C) and without one hit (θ_R, covariance C_R). For a linear fit with Gaussian errors (a Kalman fit, to a good approximation):
+
+1. θ is the best unbiased estimate there is: nothing has a smaller covariance;
+2. so the change θ_R − θ is **uncorrelated with θ**. If it were correlated, the mixture θ + k(θ_R − θ) would beat θ for some small k, which is impossible;
+3. hence Cov(θ_R) = Cov(θ) + Cov(θ_R − θ), that is **Cov(θ_R − θ) = C_R − C**.
+
+The reduced fit is the full fit plus an independent Gaussian step whose covariance is the difference of the two covariances:
+
+&nbsp;&nbsp;&nbsp;&nbsp;θ_R = θ + δ, &nbsp;&nbsp; δ ~ N(0, C_R − C), &nbsp;&nbsp; δ independent of θ
+
+Route A uses this with C′_MC in place of C_R: <b>θ′ = θ + δ, δ ~ N(0, C′_MC − C)</b>, one fresh draw per killed muon. Both C′_MC and C are MC-like, so δ is the **hit loss only**.
+
+![smearing toy](docs/hitemu_figs/f20_smearing_nested_fit.png)
+
+*Toy: a straight track through the four BPix layers (r = 2.9, 6.8, 10.9, 16.0 cm, 10 µm per hit), fitted with all four hits and without L1, 200k tracks.*
+
+- *(a) The change of the impact parameter is uncorrelated with the full fit (−0.002).*
+- *(b) Full fit + δ (dashed) reproduces the refit without L1 (filled); the full fit alone (grey) is too narrow.*
+- *(c) Pulls have width 1 only with the smearing (0.58 without).*
+- *(d) The two covariance ellipses touch along one direction; δ moves only along the other (next paragraph).*
+- <i>Removing L1 raises σ(d_xy) from 10.7 to 18.2 µm, +0.23 in log10: the size of the MC-before offset we see for dead-cell muons (−0.23 … −0.30).</i>
+
+**How the draw is made** (`hitemu.smear`):
+
+1. D = C′_MC − C, symmetrised;
+2. eigen-decomposition D = Q Λ Qᵀ;
+3. negative eigenvalues set to 0;
+4. δ = Q √Λ ξ, with ξ five independent standard normals, one draw per killed muon;
+5. stored as `{mu}_emu_delta_<param>`, 0 for muons not killed. The tree replaces `{mu}_cov_*` with C′_MC but **does not** add δ to the parameters: whoever builds a vertex or a significance from the emulated tree applies θ + δ.
+
+<b>One hit, two measurements: C′_MC − C is almost degenerate.</b> A pixel hit measures two coordinates (r–φ and z). Removing it removes two measurements, so the true C_R − C has **rank 2**: three of its five eigenvalues are exactly zero (Woodbury, section 7.3: C_R − C = C Hᵀ (V − H C Hᵀ)⁻¹ H C, and H has two rows). In panel (d) of the toy, one coordinate and two parameters, the rank is 1.
+
+The flow knows nothing about this. Its output carries small noise on the three zero directions, so a small negative eigenvalue is expected for nearly every track. Clipping it to zero is the right thing: δ then lives in the directions where information was really lost. This is the "not PD" of section 10.13 for L1: 97% of the tracks, median −0.6% of the largest eigenvalue.
+
+**Why not δ ~ N(0, C′ − C)?** C′ − C = (C′_MC − C) + (C′ − C′_MC), and the two terms are different effects:
+
+| term | what it is | certain? |
+|---|---|---|
+| C′_MC − C | losing the hit, inside MC | **yes**: the hit is gone, the parameters scatter more. Always smear. |
+| C′ − C′_MC | data against MC at the same context c′: covflow's usual correction | **open**: is data's *resolution* worse, or only its *reported* uncertainty? To be measured with the J/ψ pulls (prompt d_xy/σ, mass pull, vertex probability). |
+
+The second term is not specific to killed muons: every MC muon at every context poses the same question to covflow, so it is answered once, in covflow. If the pulls say data's resolution is worse, covflow adds δ₂ ~ N(0, C′ − C′_MC) on top. Independent Gaussian steps add, so δ + δ₂ ~ N(0, C′ − C). That one-step version is what the IP-significance check of the emulator uses (section 10.13), because it compares with data directly. It checks the combination; it does not establish the second term.
+
+#### 7.2.6 The whole recipe for one muon
+
+| step | random? | uses | input → output | branch |
+|---|---|---|---|---|
+| 1. run range | yes, once per event | luminosity shares | event → r | `emu_range` |
+| 2. kill | yes, per muon and surface | P_kill(r, cell) | hit → removed or kept | `{mu}_emu_kill_L1`, `_D1`, `_mask` |
+| 3. new context | no | per-layer masks | c → c′ | `{mu}_n_pix_hit`, `{mu}_pix_first_b_layer`, `{mu}_pix_first_e_disk`, masks (originals in `{mu}_orig_*`) |
+| 4. new covariance | no | **f_MC forward at c, f_MC inverse at c′** | C → C′_MC | `{mu}_cov_*` |
+| 5. smearing | yes, per killed muon | C′_MC − C, negative eigenvalues clipped | δ | `{mu}_emu_delta_*` |
+| 6. covflow (downstream, every muon) | no (plus δ₂ if the pulls require it) | f_MC forward at c′, f_data inverse at c′ | C′_MC → C′ | — |
+
+Two consequences worth keeping in mind:
+
+- A killed and a non-killed muon with identical C and c end up different: the first is read at c′, the second stays at c. Two killed muons with identical C and c get the same C′_MC (step 4 is deterministic) but different δ (step 5 draws for each).
+- f_MC( · ; c′) must have seen enough MC muons at c′. Where MC has (almost) none, the flow extrapolates: it still returns a valid matrix, but nothing constrains it. Only the dead-cell closure against data (section 10.13) would show it.
+
+**Advantages and requirements.**
+
+- Advantages: no detector model; uses what is already trained; no retraining.
+- Requirements: f_MC and f_data at context c′ must be trained on enough no-L1 tracks (true in 2024–2026), and the no-L1 data tracks must be the right target (section 6).
 
 ### 7.3 Route B: take the hit out of the fit
 
@@ -1158,7 +1290,9 @@ This settles item 9 of section 10.0 differently than planned: there is no need t
 **Route A, diagnostics.**
 
 - "not PD": for 97% of the L1 tracks in every epoch, C′_A − C has a small negative eigenvalue (median −0.6% of the largest). For D1 in 2022–2024, 85–94%, and the negative part is larger (median −5% to −37%); only 54–86% of the D1 tracks get a larger σ(dxy). In 2025–2026, where losing D1 changes more, it is better: 71–75% not PD with median −0.5% to −0.8%, and 98–99% of the D1 tracks get a larger σ(dxy).
-- Why: C′_A contains **two** changes, the hit loss and the covflow MC→data correction itself. The second can shrink σ in some directions, and for D1 it is as large as the hit loss (removing a D1 hit changes little).
+- Why, two reasons:
+  - **rank 2** (section 7.2.5): removing one pixel hit removes two measurements, so the true change has three eigenvalues exactly zero. Small flow noise on them makes a tiny negative eigenvalue the norm. This is the L1 picture: 97%, median −0.6%.
+  - **the data term:** C′_A contains the hit loss **and** the covflow MC→data correction itself. The second can shrink σ in some directions, and for D1 it is as large as the hit loss (removing a D1 hit changes little). This is the large D1 negatives in 2022–2024.
 - This only matters for the smearing of the track parameters: δ ~ N(0, C′ − C) should come from the hit loss alone.
 
 **Route A splits into two steps (in the code since 8 October, variant "A, MC part").**
@@ -1169,7 +1303,7 @@ This settles item 9 of section 10.0 differently than planned: there is no need t
 The second line is identical to route A by construction: f_MC(C′_MC; c′) = f_MC(C; c). The emulation now computes C′_MC, checks that covflow on it reproduces route A (|Δ log10 σ| ~ 10⁻⁷ on the synthetic sample), and reports its own closure against MC's natural no-L1 muons. What this buys for production:
 
 1. **No retraining.** The emulated MC tree (`--write-tree`, now `--tree-route A` by default) carries C′_MC and the emulated context. The existing covflow, applied as usual at the emulated context, gives route A.
-2. **A smearing that is only the hit loss:** δ ~ N(0, C′_MC − C), written as `{mu}_emu_delta_<param>`. Whether C′_MC − C is positive more often than C′_A − C on real flows is the first thing to look at in the next run (on the synthetic toy flows it is not; they are too crude to tell).
+2. **A smearing that is only the hit loss:** δ ~ N(0, C′_MC − C), written as `{mu}_emu_delta_<param>` (section 7.2.5). The fraction "not PD" will stay high, because the true change has rank 2. What to look at in the next run is the **size** of the negative part: for C′_MC − C it should be at the −0.6% level for L1 **and** for D1, since the data term is gone.
 3. **For Bmmm:** the kill step and the MC-part morph (one flow, f_MC) before the vertex fits, then covflow as already planned.
 
 ---
@@ -1189,13 +1323,15 @@ The second line is identical to route A by construction: f_MC(C′_MC; c′) = f
 5. **Uncorrectable cells** (MC dead where data works) cannot be emulated by removing hits. In 2026 they are mostly the D1+ outer edge, where data's disk extends ~1.5 mm further than MC's (section 9.6). With cap 1.5 they leave 0.9% of the D1+ efficiency missing; with the new default cap 3, 0.4%, at the price of weights up to 3 on those few tracks. Inside the nominal acceptance it is below 0.2% on every surface.
 6. **Fallback cells** (level 2) take MC's pattern scaled to the data total: data-only dead modules in a sparse cell are spread over the surface. They hold few probes by definition, and with the full sample most of them become level 1 (same cell, neighbouring months).
 7. **Route B hit errors** are one (σ_u, σ_v) per \|η\| bin. On 2026 data and MC this does not close beyond \|η\| ≈ 0.5 (section 9.8): V is pinned by the positive-definiteness of the widest tracks. To be replaced by a per-track relative error V = k · H C Hᵀ.
-8. **Route A** uses the flows as trained on non-emulated MC: f_MC is evaluated at the original context, where MC is plentiful.
+8. **Route A** uses the flows as trained on non-emulated MC: f_MC forward at the original context, where MC is plentiful, and f_MC inverse at the emulated context c′, which MC must populate with its natural no-hit muons (section 7.2.6).
 9. **Offline only.** The smearing δ is applied here only to the beam-spot IP-significance check. Production needs, in Bmmm before the vertex fits: the kill step, the MC part of route A (C′_MC, one flow: f_MC) and the smearing δ ~ N(0, C′_MC − C); covflow then runs as usual at the emulated context (section 10.13). The kill functions in `hitemu.py` are plain numpy; the morph needs torch.
 10. **Early epochs** (2022–2023) have few dead cells, so the hit-error fits may be empty (it happened for 2022_preEE and 2023_postBPix, section 10.11). `EXTRA_HITERR` in `run_hitemu.csh` can point to a neighbouring epoch's fits.
 11. **Speed:** solved (section 9.7). The full year takes 5.5 min without routes, dominated by reading. `--closure-only` is still there for even faster iterations.
 12. **Selection loss in dead cells** (section 10.4). A muon that loses its L1 hit is 2–9% less likely to be selected in data. The emulation kills hits after the selection, so it cannot reproduce this. It shows up as an L1 closure residual of up to −0.3% (2026). Possible fix: kill with the per-crossing efficiency and weight killed muons by the measured ratio r.
 13. **MC conditions are one snapshot per MC sample** (section 10.5). What the MC lost before data did is uncorrectable: 2024 D1−, runs before ~382799, ~0.6% of the 2024 muons.
 14. **Run ranges** (sections 10.8–10.9): the cap of 8 is binding in 2024–2025, and the split rule looks only at L1. Raise `--max-ranges`, and split on all surfaces once the masks are in.
+15. **Route A pairs tracks through the flow's latent space** (section 7.2.3). In 9 dimensions "the same percentile" is a modelling choice; only the population is tested (dead-cell closure, section 10.13).
+16. **Smearing of D1 losses.** C′_A − C has large negative eigenvalues for D1 in 2022–2024 (median −5% to −37%). The MC-only C′_MC − C should not: check in the next run (section 10.13, item 2), and make sure that the D1 kills of those epochs are not smeared with a matrix that is mostly clipped.
 
 ---
 
