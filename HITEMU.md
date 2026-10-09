@@ -62,7 +62,7 @@ Reweighting MC to the data hit pattern, even in variables that locate the crossi
 
 | word | meaning |
 |---|---|
-| **crossing** | the point (z, φ) where a muon's helix, from its PCA to the PV, crosses a pixel surface (L1, or D1±: r, φ). Computed from p<sub>T</sub>, η, φ, charge, PV x/y and z0 = `pv_z` + dz, in a 3.8 T field. Helix formulas: barrel z<sub>L</sub> = z0 + s<sub>L</sub>·sinh η with s<sub>L</sub> = 2R·asin(r<sub>L</sub> / 2R); disk s<sub>D</sub> = (z<sub>D</sub> − z0) / sinh η, r<sub>D</sub> = 2R·sin(s<sub>D</sub> / 2R); R[m] = p<sub>T</sub> / (0.2998 · 3.8). |
+| **crossing** | the point (z, φ) where a muon's helix, from its PCA to the PV, crosses a pixel surface (L1, or D1±: r, φ). Computed from p<sub>T</sub>, η, φ, charge, PV x/y and z<sub>0</sub> = `pv_z` + dz, with a helix in a 3.8 T field: equations, cells and two worked examples in section 3.6. |
 | **in acceptance** | the crossing is on the sensitive surface: \|z\| < 26.6 cm on L1, 4.5 < r < 14.8 cm on D1. |
 | **cell** | a bin of the surface. L1: 48 bins in φ × bins of one ROC pitch (0.83 cm) in z, so 3072 cells in acceptance. D1±: 48 in φ × 20 in r. |
 | **probe** | a muon that crosses the surface in acceptance and has at least 2 other valid pixel hits (so that the track is certainly a good track and did not need the surface hit to be reconstructed). |
@@ -220,6 +220,91 @@ This PDF is written by the script, whose labels spell the hit efficiencies ε<su
 | summary per surface: ε<sub>data</sub>, ε<sub>MC</sub>, largest weight | grey cells inside acceptance = uncorrectable | grey cells where ε<sub>MC</sub> is *not* dark: then the cause is a fallback artefact, not a real MC-dead region |
 
 `python inspect_killmaps.py <stem>` prints, per surface and range, which fallback level the data probes sit in and how much efficiency the uncorrectable cells leave missing, for any cap (`--max-weight 1.5 2 3`).
+
+### 3.6 Where a muon crosses a pixel surface: the helix equations
+
+Every probe (section 3.2) and every MC muon in the emulation (section 4) needs one thing first: **the cell of each pixel surface its track crosses**. It is computed track by track, from the reconstructed muon, by propagating a helix in a uniform 3.8 T field from the primary vertex outwards. Code: `pixel_eff_maps.cross_barrel` and `cross_disk`; `hitemu.cross` calls them for every surface.
+
+![helix crossing](docs/hitemu_figs/f21_helix_crossing.png)
+
+*(a) Transverse plane, curvature exaggerated (p<sub>T</sub> = 0.25 GeV, PV 7 mm off the axis): the helix starts at the PV in the direction φ<sub>0</sub>, a positive track turns clockwise, and φ<sub>L</sub> is the azimuth of the point where it reaches the L1 radius. The ticks on L1 are its 48 φ cells. (b) Longitudinal view, real numbers of the two examples below: z grows linearly with the transverse path length; the dots are the crossings in acceptance, circles on the barrel layers and squares on the disks. Example 2 crosses L1, L2 and then D1+, D2+, D3+. Made by `docs/hitemu_figs/make_f21.py` with the repository's own functions.*
+
+**Inputs, per muon** (branch names for the 2026 runs; all overridable with `--branch`):
+
+| symbol | meaning | branch |
+|---|---|---|
+| p<sub>T</sub>, η | transverse momentum and pseudorapidity of the muon's best track | `{mu}_best_trk_pt`, `{mu}_best_trk_eta` |
+| φ<sub>0</sub> | azimuth of the momentum at the start of the helix | `{mu}_phi` |
+| q | charge sign, ±1 | `{mu}_charge` |
+| (x<sub>0</sub>, y<sub>0</sub>) | transverse start point = position of the primary vertex | `pv_x`, `pv_y` |
+| z<sub>0</sub> | longitudinal start point = z of the track at its closest approach to the PV | `pv_z` + `{mu}_dz` |
+| B | magnetic field along +z | 3.8 T |
+
+**Step 1: radius and centre of the circle in the transverse plane.**
+
+&nbsp;&nbsp;&nbsp;&nbsp;R [cm] = 100 · p<sub>T</sub> [GeV] / (0.299792458 · B [T]) &nbsp;&nbsp;&nbsp;&nbsp;(R = 439 cm at 5 GeV, 263 cm at 3 GeV)
+
+&nbsp;&nbsp;&nbsp;&nbsp;x<sub>c</sub> = x<sub>0</sub> + q R sin φ<sub>0</sub>, &nbsp;&nbsp; y<sub>c</sub> = y<sub>0</sub> − q R cos φ<sub>0</sub>
+
+The centre lies on the right of the direction of flight for q > 0: with B along +z a positive track turns **clockwise**, its azimuth decreases.
+
+**Step 2: position after a turning angle α.** The track rotates about the centre by −q α:
+
+&nbsp;&nbsp;&nbsp;&nbsp;x(α) = x<sub>c</sub> + (x<sub>0</sub> − x<sub>c</sub>) cos(qα) + (y<sub>0</sub> − y<sub>c</sub>) sin(qα)<br>
+&nbsp;&nbsp;&nbsp;&nbsp;y(α) = y<sub>c</sub> − (x<sub>0</sub> − x<sub>c</sub>) sin(qα) + (y<sub>0</sub> − y<sub>c</sub>) cos(qα)
+
+The transverse path length is s<sub>T</sub> = R α.
+
+**Step 3: z along the track.** The dip angle is constant on a helix, dz / ds<sub>T</sub> = cot θ = sinh η, so
+
+&nbsp;&nbsp;&nbsp;&nbsp;z(α) = z<sub>0</sub> + R α sinh η
+
+**Barrel layer of radius r<sub>L</sub>** (L1–L4 at 2.9, 6.8, 10.9, 16.0 cm). α<sub>L</sub> is the smallest α with x(α)² + y(α)² = r<sub>L</sub>², found by bisection (45 steps, α ≤ π: a track that curls up before r<sub>L</sub> does not cross). The crossing is
+
+&nbsp;&nbsp;&nbsp;&nbsp;z<sub>L</sub> = z<sub>0</sub> + R α<sub>L</sub> sinh η, &nbsp;&nbsp; φ<sub>L</sub> = atan2( y(α<sub>L</sub>), x(α<sub>L</sub>) )
+
+and it is in acceptance if |z<sub>L</sub>| < 26.6 cm. For a track starting on the beam axis (x<sub>0</sub> = y<sub>0</sub> = 0) the solution is closed:
+
+&nbsp;&nbsp;&nbsp;&nbsp;α<sub>L</sub> = 2 arcsin( r<sub>L</sub> / 2R ), &nbsp;&nbsp; φ<sub>L</sub> = φ<sub>0</sub> − q α<sub>L</sub> / 2, &nbsp;&nbsp; z<sub>L</sub> = z<sub>0</sub> + 2R arcsin( r<sub>L</sub> / 2R ) sinh η ≈ z<sub>0</sub> + r<sub>L</sub> sinh η
+
+**Endcap disk at z<sub>D</sub>** (D1–D3 at ±29.1, ±39.6, ±51.6 cm; the sign selects the side). The disk fixes z, so α follows directly:
+
+&nbsp;&nbsp;&nbsp;&nbsp;α<sub>D</sub> = (z<sub>D</sub> − z<sub>0</sub>) / (R sinh η), &nbsp;&nbsp; r<sub>D</sub> = √( x(α<sub>D</sub>)² + y(α<sub>D</sub>)² ), &nbsp;&nbsp; φ<sub>D</sub> = atan2( y(α<sub>D</sub>), x(α<sub>D</sub>) )
+
+The track reaches the disk only if 0 < α<sub>D</sub> < π (α<sub>D</sub> < 0: it goes towards the other side), and the crossing is in acceptance if 4.5 < r<sub>D</sub> < 14.8 cm. From the beam axis: r<sub>D</sub> = 2R sin(α<sub>D</sub> / 2) ≈ (z<sub>D</sub> − z<sub>0</sub>) / sinh η, φ<sub>D</sub> = φ<sub>0</sub> − q α<sub>D</sub> / 2.
+
+**From the crossing to the cell** (`hitemu.cell_index`, binary search in the bin edges):
+
+| surface | first coordinate | φ |
+|---|---|---|
+| L1–L4 | z in bins of one ROC, 0.8325 cm, edges from −33.3 to +33.3 cm (64 bins inside \|z\| < 26.6) | 48 bins of 2π/48 = 0.131 rad from −π |
+| D1±–D3± | r in 20 bins of 0.69 cm from 3.0 to 16.8 cm | 48 bins, as above |
+
+At the L1 radius a φ cell is 0.131 × 2.9 cm = 3.8 mm wide. (`pixel_eff_maps.py` alone uses finer binning by default, 96 × 30, for display.)
+
+**Two worked examples** (computed with the code; PV at the origin unless stated):
+
+| | example 1 (barrel) | example 2 (forward) |
+|---|---|---|
+| p<sub>T</sub>, η, φ<sub>0</sub>, q, z<sub>0</sub> | 5 GeV, 0.5, 1.000 rad, +1, 2.0 cm | 4 GeV, 2.0, −2.000 rad, −1, 1.0 cm |
+| R | 438.9 cm | 351.1 cm |
+| surface | L1 (r<sub>L</sub> = 2.9 cm) | D1+ (z<sub>D</sub> = 29.1 cm) |
+| α | 2 arcsin(2.9 / 877.8) = 0.006607 | (29.1 − 1.0) / (351.1 · sinh 2) = 0.02207 |
+| crossing | z<sub>L</sub> = 2.0 + 438.9 · 0.006607 · sinh 0.5 = 3.511 cm; φ<sub>L</sub> = 1.000 − 0.0033 = 0.9967 rad | r<sub>D</sub> = 2 · 351.1 · sin(0.01103) = 7.748 cm; φ<sub>D</sub> = −2.000 + 0.0110 = −1.9890 rad |
+| cell | z bin 44 = [3.33, 4.16) cm, φ bin 31 = [0.916, 1.047) rad | r bin 6 = [7.14, 7.83) cm, φ bin 8 = [−2.094, −1.963) rad |
+| other surfaces crossed in acceptance | L2 at z = 5.54 cm, L3, L4 | L1 at z = 11.52 cm, L2 at z = 25.66 cm, D2+, D3+ |
+
+With the PV at (x<sub>0</sub>, y<sub>0</sub>) = (0.5, −0.3) mm instead of the origin, example 1 crosses L1 at φ<sub>L</sub> = 0.9766 rad (−0.020 rad, 15% of a cell) and z<sub>L</sub> = 3.510 cm: the same cell, but a transverse offset of the start point matters ~1/r<sub>L</sub> more than the curvature.
+
+**What matters, and what is approximated.**
+
+- **z<sub>0</sub> moves z<sub>L</sub> one to one**, and an L1 cell is 0.83 cm long: z<sub>0</sub> is essential, which is why it is taken from the PV and the track's dz, not from the beam spot.
+- **The curvature is a small correction** inside the pixel detector: φ<sub>L</sub> − φ<sub>0</sub> = −q α<sub>L</sub>/2 ≈ −q r<sub>L</sub>/2R, 0.003 rad at 5 GeV on L1 (2.5% of a cell), 0.011 rad on D1 in example 2. The sign of q still matters on L4 and the disks.
+- **Start point = PV, not the track's point of closest approach.** The transverse impact parameter d<sub>xy</sub> is ignored. A transverse offset d shifts φ<sub>L</sub> by about d / r<sub>L</sub>: 0.003 rad for 100 µm (2.6% of a cell), 0.03 rad for 1 mm.
+- **φ<sub>0</sub> is the muon's φ** (`{mu}_phi`), while p<sub>T</sub> and η are those of the best track; for a muon whose best track is its inner track the two directions coincide.
+- **No multiple scattering or energy loss** before the surface: the deflection by the beam pipe is ~10⁻⁴ rad at 5 GeV, a few µm at L1.
+- **Nominal geometry:** one cylinder per barrel layer and one plane per disk, at the radii and z above (`GEOM` in `pixel_eff_maps.py`, marked "CHECK against the CMSSW geometry"). Real modules are flat and overlap, so the true radius varies by a few mm around the nominal one; a radius error Δr moves z<sub>L</sub> by Δr · sinh η, a fraction of a cell. The data–MC mismatch of ~1.5 mm at the outer edge of D1 (section 9.6) is of this kind.
+- **Without a charge branch** the helix becomes a straight line (a warning is printed); the 2026 ntuples have it.
 
 ---
 
