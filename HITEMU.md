@@ -33,7 +33,7 @@ Figure names tell where a figure comes from:
 
 ## 0. The problem in one picture
 
-covflow corrects the MC track covariance (5×5) towards data with a normalising flow. That flow is *conditioned* on a **context**: p<sub>T</sub>, η, φ and the hit pattern (how many pixel hits, which BPix layer and which FPix disk come first). The correction is only meaningful if MC and data tracks with the **same context** are comparable.
+covflow corrects the MC track covariance (5×5) towards data with a normalising flow. That flow is *conditioned* on a **context** of five variables: p<sub>T</sub> (as log p<sub>T</sub>) and η of the muon's best track, and its hit pattern: number of pixel hits, first BPix layer, first FPix disk. The emulation reads this list from each trained run (`covflow.json`), so it always matches the training. The correction is only meaningful if MC and data tracks with the **same context** are comparable.
 
 In 2026 they are not comparable, because the pixel detector in data has lost many more modules than the MC conditions (Summer24) know about. The figure shows the **hit efficiency** ε (section 1): the fraction of muons crossing a piece of detector that leave a valid hit there.
 
@@ -43,7 +43,7 @@ In 2026 they are not comparable, because the pixel detector in data has lost man
 
 In 2026, **one data track in three has no L1 hit, compared with a few per cent in MC**. covflow trained as it is would be asked to map, say, "MC tracks starting at L2" (5% of MC, mostly geometric gaps) onto "data tracks starting at L2" (30% of data, mostly dead modules). These are different populations.
 
-Reweighting MC in (p<sub>T</sub>, η, φ, z0) to the data hit pattern does not work: the hit loss is localised in (z, φ) cells that are dead in data and working in MC, so the MC tracks that "should" have lost the hit are a tiny minority and get weights up to ~10³.
+Reweighting MC to the data hit pattern, even in variables that locate the crossing (p<sub>T</sub>, η, φ, z0), does not work: the hit loss is localised in (z, φ) cells that are dead in data and working in MC, so the MC tracks that "should" have lost the hit are a tiny minority and get weights up to ~10³.
 
 **The approach here: make the MC lose the same hits as data, track by track.** In a cell where the hit efficiency is 40% in data and 97% in MC (ε<sub>data</sub> = 0.40, ε<sub>MC</sub> = 0.97), each MC hit is removed with probability 1 − 0.40/0.97 = 0.59. The MC then has the data hit pattern, with weights ≈ 1. Two questions remain:
 
@@ -350,8 +350,8 @@ After that the emulated MC is an ordinary MC sample, and the usual covflow (MC f
 | θ | the 5 track parameters (q/p, λ, φ, d<sub>xy</sub>, d<sub>sz</sub>) | ntuple |
 | C | their 5×5 covariance, from the fit with all hits | `{mu}_cov_*` |
 | y = φ(C) | the 9 flow features: 5 log σ, plus 4 atanh of the partial correlations kept by the r–φ / r–z blocks. φ is invertible, and every y gives a positive-definite C | `features.py` |
-| c | the context of the muon **as reconstructed**: pT, η, number of pixel hits, first BPix layer, first FPix disk | ntuple |
-| c′ | the context **after the kill**: pT and η unchanged; pixel hits minus the hits on the killed layer; first layer / disk moved to the next one that has a hit | `hitemu.emulate` |
+| c | the context of the muon **as reconstructed**: p<sub>T</sub>, η, number of pixel hits, first BPix layer, first FPix disk (the five context variables of the trained flows; no φ) | ntuple |
+| c′ | the context **after the kill**: p<sub>T</sub> and η unchanged; pixel hits minus the hits on the killed layer; first layer / disk moved to the next one that has a hit | `hitemu.emulate` |
 | f<sub>MC</sub>(y; c) | the MC flow: a bijection between MC features and the latent space, trained on MC muons of all contexts | covflow run, `flow_mc` |
 | f<sub>data</sub>(y; c) | the same, for data | covflow run, `flow_data` |
 | u | latent point, u ~ N(0, 1) in 9 dimensions | — |
@@ -384,9 +384,9 @@ A track more precise than 30% of the MC muons with an L1 hit becomes more precis
 - *Middle and bottom: MC with the L1 hit (blue), MC without it (orange), data without it (green), as densities and as cumulative distributions.*
 - <i>Route A moves the track along the horizontal line at 0.30: first to the orange curve with the MC flow (C′<sub>MC</sub>), then to the green one with the usual covflow (C′).</i>
 
-**Why the MC flow can do this at all.** f<sub>MC</sub> was trained on MC muons of **all** contexts. About 6% of MC muons have no L1 hit for natural reasons (gaps between modules, the MC's own small inefficiency). So f<sub>MC</sub>( · ; c′) already knows what the MC reconstruction gives for a muon without an L1 hit, at every pT and η. Route A borrows that knowledge: no detector model, no fit, no retraining.
+**Why the MC flow can do this at all.** f<sub>MC</sub> was trained on MC muons of **all** contexts. About 6% of MC muons have no L1 hit for natural reasons (gaps between modules, the MC's own small inefficiency). So f<sub>MC</sub>( · ; c′) already knows what the MC reconstruction gives for a muon without an L1 hit, at every p<sub>T</sub> and η. Route A borrows that knowledge: no detector model, no fit, no retraining.
 
-**What it assumes.** An MC muon that lost its hit at random (our kill) has the covariance distribution of MC muons that lack the hit for natural reasons, at the same (pT, η, hit pattern). This is the mixture test of sections 6 and 10.10, in its MC version: W0 (no hit in a working cell) against D0 (no hit in a dead cell) agree within 0.03 in log<sub>10</sub> σ(d<sub>xy</sub>) for L1.
+**What it assumes.** An MC muon that lost its hit at random (our kill) has the covariance distribution of MC muons that lack the hit for natural reasons, at the same (p<sub>T</sub>, η, hit pattern). This is the mixture test of sections 6 and 10.10, in its MC version: W0 (no hit in a working cell) against D0 (no hit in a dead cell) agree within 0.03 in log<sub>10</sub> σ(d<sub>xy</sub>) for L1.
 
 #### 7.2.3 Adding the data part: the usual covflow at c′
 
