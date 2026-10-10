@@ -62,13 +62,18 @@ def sample(n, is_data, seed):
     run = rng.integers(380000, 380200, n) if is_data else np.ones(n, np.int64)
     pv_z = rng.normal(0.0 if is_data else 0.4, 3.8 if is_data else 3.6, n)
     d['pv_x'] = np.full(n, 0.01); d['pv_y'] = np.full(n, -0.02); d['pv_z'] = pv_z
+    # displaced dimuon vertex: both muons start there (the helix origin by default)
+    lxy = rng.exponential(0.05, n); fv = rng.uniform(-np.pi, np.pi, n)
+    vx = d['pv_x'] + lxy * np.cos(fv); vy = d['pv_y'] + lxy * np.sin(fv)
+    vz = pv_z + rng.normal(0, 0.02, n)
+    d['vx'], d['vy'], d['vz'] = vx, vy, vz
     d['run'] = run
     d['mass'] = 3.0969 + 0.03 * rng.normal(size=n)
     t = (run - 380000) / 200.0
     for mu in ('mu1', 'mu2'):
         pt = 3.5 + rng.exponential(4, n); eta = rng.uniform(-2.4, 2.4, n)
         phi = rng.uniform(-np.pi, np.pi, n); q = rng.choice([-1., 1.], n)
-        z0 = pv_z + rng.normal(0, 0.02, n)
+        z0 = vz
         par = H.helix_to_curv(pt, eta, phi, q, z0)
         info = np.zeros((n, 5, 5))
         qop = par[:, 0]
@@ -78,7 +83,7 @@ def sample(n, is_data, seed):
         count = np.zeros(n, np.int64)
         outlier = np.zeros(n, bool)
         for name in H.ALL_SURFACES:
-            x, ph = H.cross(name, pt, eta, phi, q, np.zeros(n), np.zeros(n), z0)
+            x, ph = H.cross(name, pt, eta, phi, q, vx, vy, z0)
             acc = H.in_acceptance(name, x)
             if name[0] == 'D':
                 acc &= (eta >= 0) if name.endswith('+') else (eta < 0)

@@ -24,8 +24,10 @@ set CONDA  = /work/manzoni/miniconda3
 set ENV    = covflow
 set EPOCHS = (2022_preEE 2022_postEE 2023_preBPix 2023_postBPix 2024 2025 2026)
 
-# options shared by every epoch (same as the 2026 test run)
-set OPTS = (--branch vx=pv_x --branch vy=pv_y --z0-from dz_pv --png)
+# options shared by every epoch. The helix starts at the dimuon (J/psi) vertex
+# (vx, vy, vz; default since Oct 2026); the 2026 test run used the PV:
+# --helix-origin pv
+set OPTS = (--helix-origin dimuon_vertex --png)
 
 # ------------------------------------------------------------------ checks
 if ( $#argv > 0 ) set EPOCHS = ($argv)

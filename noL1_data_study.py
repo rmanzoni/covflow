@@ -231,6 +231,7 @@ def main():
     rng = np.random.default_rng(a.seed)
     info = P.load_epoch(a)
     km = H.KillMaps.load(a.killmaps)
+    H.check_origin(km.meta, a, 'the kill maps')
     if km.meta.get('epoch') != a.epoch:
         die('kill maps are for epoch %s, not %s' % (km.meta.get('epoch'), a.epoch))
     tmpl, run_branch = H.resolve_branches(a, need_cov=True)

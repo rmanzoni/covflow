@@ -62,7 +62,7 @@ Reweighting MC to the data hit pattern, even in variables that locate the crossi
 
 | word | meaning |
 |---|---|
-| **crossing** | the point (z, φ) where a muon's helix, from its PCA to the PV, crosses a pixel surface (L1, or D1±: r, φ). Computed from p<sub>T</sub>, η, φ, charge, PV x/y and z<sub>0</sub> = `pv_z` + dz, with a helix in a 3.8 T field: equations, cells and two worked examples in section 3.6. |
+| **crossing** | the point (z, φ) where a muon's helix, starting at the dimuon vertex, crosses a pixel surface (L1, or D1±: r, φ). Computed from p<sub>T</sub>, η, φ, charge and the dimuon vertex (`vx`, `vy`, `vz`), with a helix in a 3.8 T field: equations, cells and two worked examples in section 3.6 (until October 2026 the helix started at the PV). |
 | **in acceptance** | the crossing is on the sensitive surface: \|z\| < 26.6 cm on L1, 4.5 < r < 14.8 cm on D1. |
 | **cell** | a bin of the surface. L1: 48 bins in φ × bins of one ROC pitch (0.83 cm) in z, so 3072 cells in acceptance. D1±: 48 in φ × 20 in r. |
 | **probe** | a muon that crosses the surface in acceptance and has at least 2 other valid pixel hits (so that the track is certainly a good track and did not need the surface hit to be reconstructed). |
@@ -223,11 +223,11 @@ This PDF is written by the script, whose labels spell the hit efficiencies ε<su
 
 ### 3.6 Where a muon crosses a pixel surface: the helix equations
 
-Every probe (section 3.2) and every MC muon in the emulation (section 4) needs one thing first: **the cell of each pixel surface its track crosses**. It is computed track by track, from the reconstructed muon, by propagating a helix in a uniform 3.8 T field from the primary vertex outwards. Code: `pixel_eff_maps.cross_barrel` and `cross_disk`; `hitemu.cross` calls them for every surface.
+Every probe (section 3.2) and every MC muon in the emulation (section 4) needs one thing first: **the cell of each pixel surface its track crosses**. It is computed track by track, from the reconstructed muon, by propagating a helix in a uniform 3.8 T field outwards from the **dimuon vertex**, the point both muons of the J/ψ candidate come from. Code: `pixel_eff_maps.cross_barrel` and `cross_disk`; `hitemu.cross` calls them for every surface.
 
 ![helix crossing](docs/hitemu_figs/f21_helix_crossing.png)
 
-*(a) Transverse plane, curvature exaggerated (p<sub>T</sub> = 0.25 GeV, PV 7 mm off the axis): the helix starts at the PV in the direction φ<sub>0</sub>, a positive track turns clockwise, and φ<sub>L</sub> is the azimuth of the point where it reaches the L1 radius. The ticks on L1 are its 48 φ cells. (b) Longitudinal view, real numbers of the two examples below: z grows linearly with the transverse path length; the dots are the crossings in acceptance, circles on the barrel layers and squares on the disks. Example 2 crosses L1, L2 and then D1+, D2+, D3+. Made by `docs/hitemu_figs/make_f21.py` with the repository's own functions.*
+*(a) Transverse plane, curvature exaggerated (p<sub>T</sub> = 0.25 GeV, start point 7 mm off the axis): the helix starts at the dimuon vertex in the direction φ<sub>0</sub>, a positive track turns clockwise, and φ<sub>L</sub> is the azimuth of the point where it reaches the L1 radius. The ticks on L1 are its 48 φ cells. (b) Longitudinal view, real numbers of the two examples below: z grows linearly with the transverse path length; the dots are the crossings in acceptance, circles on the barrel layers and squares on the disks. Example 2 crosses L1, L2 and then D1+, D2+, D3+. Made by `docs/hitemu_figs/make_f21.py` with the repository's own functions.*
 
 **Inputs, per muon** (branch names for the 2026 runs; all overridable with `--branch`):
 
@@ -236,8 +236,7 @@ Every probe (section 3.2) and every MC muon in the emulation (section 4) needs o
 | p<sub>T</sub>, η | transverse momentum and pseudorapidity of the muon's best track | `{mu}_best_trk_pt`, `{mu}_best_trk_eta` |
 | φ<sub>0</sub> | azimuth of the momentum at the start of the helix | `{mu}_phi` |
 | q | charge sign, ±1 | `{mu}_charge` |
-| (x<sub>0</sub>, y<sub>0</sub>) | transverse start point = position of the primary vertex | `pv_x`, `pv_y` |
-| z<sub>0</sub> | longitudinal start point = z of the track at its closest approach to the PV | `pv_z` + `{mu}_dz` |
+| (x<sub>0</sub>, y<sub>0</sub>, z<sub>0</sub>) | start point = the dimuon vertex from the Kalman fit of the two muons (`cand.vtx` in Bmmm) | `vx`, `vy`, `vz` |
 | B | magnetic field along +z | 3.8 T |
 
 **Step 1: radius and centre of the circle in the transverse plane.**
@@ -294,17 +293,26 @@ At the L1 radius a φ cell is 0.131 × 2.9 cm = 3.8 mm wide. (`pixel_eff_maps.py
 | cell | z bin 44 = [3.33, 4.16) cm, φ bin 31 = [0.916, 1.047) rad | r bin 6 = [7.14, 7.83) cm, φ bin 8 = [−2.094, −1.963) rad |
 | other surfaces crossed in acceptance | L2 at z = 5.54 cm, L3, L4 | L1 at z = 11.52 cm, L2 at z = 25.66 cm, D2+, D3+ |
 
-With the PV at (x<sub>0</sub>, y<sub>0</sub>) = (0.5, −0.3) mm instead of the origin, example 1 crosses L1 at φ<sub>L</sub> = 0.9766 rad (−0.020 rad, 15% of a cell) and z<sub>L</sub> = 3.510 cm: the same cell, but a transverse offset of the start point matters ~1/r<sub>L</sub> more than the curvature.
+With the start point at (x<sub>0</sub>, y<sub>0</sub>) = (0.5, −0.3) mm instead of the origin (a dimuon vertex displaced by 0.6 mm), example 1 crosses L1 at φ<sub>L</sub> = 0.9766 rad (−0.020 rad, 15% of a cell) and z<sub>L</sub> = 3.510 cm: the same cell, but a transverse offset of the start point matters ~1/r<sub>L</sub> more than the curvature.
 
 **What matters, and what is approximated.**
 
-- **z<sub>0</sub> moves z<sub>L</sub> one to one**, and an L1 cell is 0.83 cm long: z<sub>0</sub> is essential, which is why it is taken from the PV and the track's dz, not from the beam spot.
+- **z<sub>0</sub> moves z<sub>L</sub> one to one**, and an L1 cell is 0.83 cm long: z<sub>0</sub> is essential, which is why it is taken from the fitted vertex, not from the beam spot.
 - **The curvature is a small correction** inside the pixel detector: φ<sub>L</sub> − φ<sub>0</sub> = −q α<sub>L</sub>/2 ≈ −q r<sub>L</sub>/2R, 0.003 rad at 5 GeV on L1 (2.5% of a cell), 0.011 rad on D1 in example 2. The sign of q still matters on L4 and the disks.
-- **Start point = PV, not the track's point of closest approach.** The transverse impact parameter d<sub>xy</sub> is ignored. A transverse offset d shifts φ<sub>L</sub> by about d / r<sub>L</sub>: 0.003 rad for 100 µm (2.6% of a cell), 0.03 rad for 1 mm.
+- **Start point = the dimuon vertex** (since October 2026; `--helix-origin dimuon_vertex`, the default of every script). The selection requires a displaced J/ψ (L<sub>xy</sub> cos α · m / p<sub>T</sub> > 80 µm in `configs/run3_epochs.py`, a proper decay length), so the muons do not come from the PV: starting there put every helix off by the decay length. A transverse offset d shifts φ<sub>L</sub> by about d / r<sub>L</sub>: 0.003 rad for 100 µm (2.6% of a cell), 0.03 rad for 1 mm (a quarter of a cell). The vertex resolution, tens of µm, is negligible on this scale. All the results of sections 9 and 10 were made with the PV as start point.
+- **Kill maps carry their start point.** The cells of a map depend on where the helix starts, so `build_kill_maps.py` stores `helix_origin` in the map, and `emulate_hit_loss.py` / `noL1_data_study.py` stop if the run uses another one. Maps written before October 2026 have no such field and are recognised as PV-based (`z0_from = dz_pv`): rebuild them, or run with `--helix-origin pv` to reproduce the old numbers.
 - **φ<sub>0</sub> is the muon's φ** (`{mu}_phi`), while p<sub>T</sub> and η are those of the best track; for a muon whose best track is its inner track the two directions coincide.
 - **No multiple scattering or energy loss** before the surface: the deflection by the beam pipe is ~10⁻⁴ rad at 5 GeV, a few µm at L1.
 - **Nominal geometry:** one cylinder per barrel layer and one plane per disk, at the radii and z above (`GEOM` in `pixel_eff_maps.py`, marked "CHECK against the CMSSW geometry"). Real modules are flat and overlap, so the true radius varies by a few mm around the nominal one; a radius error Δr moves z<sub>L</sub> by Δr · sinh η, a fraction of a cell. The data–MC mismatch of ~1.5 mm at the outer edge of D1 (section 9.6) is of this kind.
 - **Without a charge branch** the helix becomes a straight line (a warning is printed); the 2026 ntuples have it.
+
+> **Note for later (Ric, October 2026): prompt J/ψ are the better probes for the kill maps.** The displaced-J/ψ sample is used only for historical reasons: it is the covflow training sample, with the displacement cut and the displaced-vertex trigger (HLT_DoubleMu4_3_LowMass) of the analysis. The kill maps measure a property of the detector, the hit efficiency of each cell, and any well-reconstructed muon can measure it. Prompt J/ψ would be better on every count:
+>
+> - **the start point is the PV**, measured more precisely than a two-track vertex and constrained by the beam spot, with no decay length to propagate through;
+> - **more probes per cell**, so finer run ranges and fewer cells on the fallback levels: most J/ψ are prompt, and the displacement cut throws them away;
+> - **probably less selection loss in dead cells** (section 10.4): part of it comes from the displacement cut, whose resolution gets worse when a muon loses its L1 hit.
+>
+> It needs a prompt-J/ψ trigger path and a matching ntuple selection (the current path has a displaced-vertex filter). The covflow training sample stays the displaced one; only the probe sample for `build_kill_maps.py` would change.
 
 ---
 
@@ -434,7 +442,7 @@ After that the emulated MC is an ordinary MC sample, and the usual covflow (MC f
 |---|---|---|
 | θ | the 5 track parameters (q/p, λ, φ, d<sub>xy</sub>, d<sub>sz</sub>) | ntuple |
 | C | their 5×5 covariance, from the fit with all hits | `{mu}_cov_*` |
-| y = φ(C) | the 9 flow features: 5 log σ, plus 4 atanh of the partial correlations kept by the r–φ / r–z blocks. φ is invertible, and every y gives a positive-definite C | `features.py` |
+| y = φ(C) | the 9 flow features: 5 log σ, plus 4 atanh of the partial correlations kept by the r–φ / r–z blocks. φ is invertible, and every y gives a positive-definite C (Cholesky, section 7.5) | `features.py` |
 | c | the context of the muon **as reconstructed**: p<sub>T</sub>, η, number of pixel hits, first BPix layer, first FPix disk (the five context variables of the trained flows; no φ) | ntuple |
 | c′ | the context **after the kill**: p<sub>T</sub> and η unchanged; pixel hits minus the hits on the killed layer; first layer / disk moved to the next one that has a hit | `hitemu.emulate` |
 | f<sub>MC</sub>(y; c) | the MC flow: a bijection between MC features and the latent space, trained on MC muons of all contexts | covflow run, `flow_mc` |
@@ -621,6 +629,49 @@ With routes the same page gains three curves. Until they are run on real data, h
 ![s05](docs/hitemu_figs/s05_emu_AvsB.png)
 
 *Synthetic example (no real equivalent yet): route A against route B (final), track by track, in log<sub>10</sub> σ(d<sub>xy</sub>) and σ(d<sub>sz</sub>). A narrow diagonal means the two routes agree for each track, not only on average.*
+
+### 7.5 Why every matrix covflow returns is a valid covariance: the Cholesky decomposition
+
+A covariance matrix must be **symmetric** and **positive definite** (PD): every combination of the parameters, x<sup>T</sup> C x, has a positive variance. A network that output the 15 numbers of C directly would break this easily: a slightly too large correlation, and C has a negative eigenvalue, a vertex fit with it is meaningless. covflow never lets the flow see C. It sees 15 (in production 9) features y that can take **any real value**, and every y maps back to a valid C. The Cholesky decomposition is what makes this possible.
+
+**The decomposition.** Every symmetric PD matrix A can be written in exactly one way as
+
+&nbsp;&nbsp;&nbsp;&nbsp;A = L L<sup>T</sup>, &nbsp;&nbsp; L lower triangular with a positive diagonal.
+
+The converse is what covflow uses: **any** lower-triangular L with a positive diagonal gives a valid matrix.
+
+- L L<sup>T</sup> is symmetric automatically: (L L<sup>T</sup>)<sup>T</sup> = L L<sup>T</sup>.
+- It is PD automatically: x<sup>T</sup> L L<sup>T</sup> x = |L<sup>T</sup> x|² > 0 for x ≠ 0, because L, with a positive diagonal, is invertible.
+
+So instead of building C and hoping it is valid, covflow builds L, and validity comes for free.
+
+**The three steps from C to the features y** (`features.matrix_to_features`; the exact inverse is `features_to_matrix`):
+
+1. **Split scale and shape:** C = D R D, with D = diag(σ<sub>1</sub>, …, σ<sub>5</sub>) the five uncertainties and R the correlation matrix (ones on the diagonal). The first five features are y<sub>i</sub> = log σ<sub>i</sub>: any real number gives a positive σ.
+2. **Cholesky of the correlation matrix:** R = L L<sup>T</sup>. Because R has ones on the diagonal, every row of L is a vector of unit length.
+3. **Canonical partial correlations (CPCs):** a unit-length row can be written with one number in (−1, 1) per entry left of the diagonal:
+
+&nbsp;&nbsp;&nbsp;&nbsp;L<sub>ij</sub> = z<sub>ij</sub> · ∏<sub>k&lt;j</sub> √(1 − z<sub>ik</sub>²) &nbsp;(j &lt; i), &nbsp;&nbsp;&nbsp; L<sub>ii</sub> = ∏<sub>k&lt;i</sub> √(1 − z<sub>ik</sub>²)
+
+&nbsp;&nbsp;&nbsp;&nbsp;The ten z<sub>ij</sub> are **independent**: any choice in (−1, 1) gives a valid R. The remaining features are y = atanh z<sub>ij</sub>, which runs over the whole real line.
+
+Read backwards, y → (σ, z) → L → R → C is a bijection between ℝ<sup>15</sup> and all valid 5×5 covariances. Wherever the flow puts a track, the result is a covariance.
+
+**What the z are.** For the 2×2 case, R = [[1, ρ], [ρ, 1]], L = [[1, 0], [ρ, √(1 − ρ²)]] and z<sub>21</sub> = ρ: the ordinary correlation. With three parameters, z<sub>21</sub> = ρ<sub>21</sub> and z<sub>31</sub> = ρ<sub>31</sub>, but
+
+&nbsp;&nbsp;&nbsp;&nbsp;z<sub>32</sub> = (ρ<sub>32</sub> − ρ<sub>31</sub> ρ<sub>21</sub>) / √((1 − ρ<sub>31</sub>²)(1 − ρ<sub>21</sub>²)),
+
+the correlation of parameters 3 and 2 **after removing what both share with parameter 1** (a partial correlation). In general z<sub>ij</sub> is the correlation of i and j given the parameters before j in the order (q/p, λ, φ, d<sub>xy</sub>, d<sub>sz</sub>). The feature names `pcorr_dxy_phi`, `pcorr_dsz_lambda`, … in the covflow plots are these z (as atanh z).
+
+![Cholesky and CPCs](docs/hitemu_figs/f22_cholesky_cpc.png)
+
+*(a) Why the plain correlations cannot be the features: for 3×3, the valid (ρ<sub>21</sub>, ρ<sub>31</sub>) at fixed ρ<sub>32</sub> fill only the inside of an ellipse, not the square (−1, 1)². Three correlations drawn independently in (−1, 1) give a valid matrix 62% of the time; for 5×5, 2.2% of the time. (b) The CPCs have no such constraint, and atanh stretches each of them to the whole real line, where the flow works. Made by `docs/hitemu_figs/make_f22.py`.*
+
+**In production.** The block structure (section 7.2.1) keeps 9 features: the five log σ and the four within-block CPCs (q/p–φ, q/p–d<sub>xy</sub>, φ–d<sub>xy</sub> in r–φ; λ–d<sub>sz</sub> in r–z). The six cross-block CPCs, about 0 in data and MC, are copied unchanged; a matrix rebuilt with them is still valid by the same argument. Numerically, z is clamped to |z| ≤ 0.999999, so that L stays invertible in floating point; the most correlated pair in real tracks, φ–d<sub>xy</sub>, reaches |z| ≈ 0.99 (atanh z ≈ −2.5 in the covflow marginal plots), still far from the clamp. The production report confirms it: 100% of the corrected matrices positive definite in all 14 trainings.
+
+**What the construction does not guarantee.** It makes every C, C′<sub>MC</sub> and C′ valid. It says nothing about **differences** of covariances: C′<sub>MC</sub> − C, used for the smearing, can have negative eigenvalues. That is why `hitemu.smear` clips them (section 7.2.5).
+
+The code also has a simpler "log-Cholesky" variant, the Cholesky of C itself with log on its diagonal (`--param log_cholesky`), kept for cross-checks. Its off-diagonal entries are unbounded and mix scale and shape, so a flow that wanders can return matrices that are valid on paper but numerically singular. The default above avoids this.
 
 ---
 
@@ -1293,7 +1344,7 @@ This is the missing L2/L3 (and D2) emulation of section 9.2, now seen in every e
 
 1. **Get the flows found** (#1): check the `RUNS` tag in `run_hitemu.csh` and that `covflow.json` exists for mu1 and mu2 in every epoch. Then rerun step 4 only. Example for one epoch, the rest as in the driver:
    ```
-   python emulate_hit_loss.py --epoch 2024 --branch vx=pv_x --branch vy=pv_y --z0-from dz_pv \
+   python emulate_hit_loss.py --epoch 2024 --helix-origin pv \
        --killmaps hitemu/2024/killmaps/killmaps_2024 --route A B \
        --hit-errors hitemu/2024/noL1_mc/hiterrors_mc_2024.json hitemu/2024/noL1_data/hiterrors_data_2024.json \
        --flow-dir "$RUNS/@epoch@/@mu@/task_0" --min-weight 0 --out hitemu/2024/emu
@@ -1417,6 +1468,7 @@ The second line is identical to route A by construction: f<sub>MC</sub>(C′<sub
 14. **Run ranges** (sections 10.8–10.9): the cap of 8 is binding in 2024–2025, and the split rule looks only at L1. Raise `--max-ranges`, and split on all surfaces once the masks are in.
 15. **Route A pairs tracks through the flow's latent space** (section 7.2.3). In 9 dimensions "the same percentile" is a modelling choice; only the population is tested (dead-cell closure, section 10.13).
 16. **Smearing of D1 losses.** C′<sub>A</sub> − C has large negative eigenvalues for D1 in 2022–2024 (median −5% to −37%). The MC-only C′<sub>MC</sub> − C should not: check in the next run (section 10.13, item 2), and make sure that the D1 kills of those epochs are not smeared with a matrix that is mostly clipped.
+17. **Probe sample for the kill maps.** Prompt J/ψ would make better probes than the displaced ones (start point at the PV, more probes, less selection loss in dead cells): see the note at the end of section 3.6. Needs a prompt-J/ψ trigger path in the ntuple production.
 
 ---
 
@@ -1438,6 +1490,7 @@ The second line is identical to route A by construction: f<sub>MC</sub>(C′<sub
 
 | script | option | default | meaning |
 |---|---|---|---|
+| all scripts | `--helix-origin` | `dimuon_vertex` | start point of the helix that finds the crossed cells (section 3.6): `dimuon_vertex` = (`vx`, `vy`, `vz`); `pv` = (`pv_x`, `pv_y`, `pv_z` + `{mu}_dz`), the choice until October 2026. The kill maps record it, and the emulation refuses maps made with the other one |
 | `build_kill_maps` | `--max-ranges` | 10 | maximum number of run ranges (8 until 8 Oct 2026) |
 | | `--min-cell-probes` | 40 | minimum mean probes per L1 cell in a range (× 3072 = minimum per range) |
 | | `--min-gain` | 25 | minimum −2 ln L gain to split |

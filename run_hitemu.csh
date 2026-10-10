@@ -41,9 +41,12 @@ set WRITE_TREE = 0          # 1: also write emu/emu_<epoch>_route<A|B>.root (lar
 #   set EXTRA_HITERR = (hitemu/2024/noL1_mc/hiterrors_mc_2024.json hitemu/2024/noL1_data/hiterrors_data_2024.json)
 set EXTRA_HITERR = ()
 
-# options passed to every script (same branches as the effmaps runs; these are
-# also the scripts' defaults). Add e.g. --max-events 300000 for a quick pass.
-set OPTS = (--branch vx=pv_x --branch vy=pv_y --z0-from dz_pv)
+# options passed to every script. Add e.g. --max-events 300000 for a quick pass.
+# The helix that finds the crossed pixel cells starts at the dimuon (J/psi)
+# vertex (vx, vy, vz), the script default since Oct 2026: the probes come from
+# displaced J/psi. Kill maps built before that used the PV; the emulation stops
+# if the maps and the run disagree. Old behaviour: --helix-origin pv
+set OPTS = (--helix-origin dimuon_vertex)
 
 # ------------------------------------------------------------------ checks
 if ( $#argv > 0 ) set EPOCHS = ($argv)

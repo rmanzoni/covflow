@@ -17,9 +17,11 @@ Probe   = a muon track (mu1 and mu2 of each selected event) whose helix crosses
 Cell    = where the probe crosses S:
             barrel layer : (z, phi) on the cylinder r = r_L
             endcap disk  : (r, phi) on the plane |z| = z_D, one map per side
-          computed track by track from the exact helix (pt, eta, phi, charge,
-          z0 of the track; B = 3.8 T). This is why z0 enters: two tracks with
-          the same eta and phi cross different modules if their z0 differ.
+          computed track by track from the exact helix (pt, eta, phi, charge;
+          B = 3.8 T) started at --helix-origin: by default the dimuon vertex
+          (vx, vy, vz), since the probes come from displaced J/psi; 'pv' starts
+          at (pv_x, pv_y, pv_z + {mu}_dz). This is why z0 enters: two tracks
+          with the same eta and phi cross different modules if their z0 differ.
 eps(cell) = (probes in the cell WITH a valid hit on S) / (probes in the cell)
           MC probes carry the pileup weight of the epoch; data probes weight 1.
 
@@ -105,12 +107,14 @@ BRANCHES = dict(
     pt='{mu}_best_trk_pt',          # covflow context
     eta='{mu}_best_trk_eta',        # covflow context
     phi='{mu}_phi',                 # used by phi_map.py
-    charge='{mu}_charge',           # ASSUMED name -- optional (straight line if empty)
-    vz='{mu}_vz',                   # ASSUMED name -- track reference point z (z0)
-    vx='{mu}_vx',                   # ASSUMED name -- optional (0 if empty)
-    vy='{mu}_vy',                   # ASSUMED name -- optional (0 if empty)
+    charge='{mu}_charge',           # optional (straight line if empty)
+    # helix start point, see --helix-origin. Default: the dimuon (J/psi) vertex
+    # of the Kalman fit, cand.vtx in Bmmm (event branches vx, vy, vz).
+    vx='vx',                        # optional (0 if empty)
+    vy='vy',                        # optional (0 if empty)
+    vz='vz',                        # z0 with --z0-from vz
     dz='{mu}_dz',                   # only with --z0-from dz_pv
-    pv_z='pv_z',                    # only with --z0-from dz_pv (ASSUMED name)
+    pv_z='pv_z',                    # only with --z0-from dz_pv
     n_pix='{mu}_n_pix_hit',         # covflow context
     first_b='{mu}_pix_first_b_layer',
     first_e='{mu}_pix_first_e_disk',
@@ -182,8 +186,7 @@ def parse_args():
     p.add_argument('--muons', nargs='+', default=['mu1', 'mu2'])
     p.add_argument('--branch', action='append', default=[], metavar='KEY=TEMPLATE',
                    help='override a branch template, e.g. charge={mu}_q or vx=')
-    p.add_argument('--z0-from', choices=('vz', 'dz_pv'), default='vz',
-                   help='z0 = {mu}_vz, or pv_z + {mu}_dz (default: vz)')
+    add_helix_origin_args(p)
     p.add_argument('--min-other-hits', type=int, default=2,
                    help='valid pixel hits required besides the one on S '
                         '(default: %(default)s)')
@@ -247,6 +250,45 @@ def resolve_surfaces(names):
         if s not in MASK_BIT:
             die('unknown surface %r: use L1..L4, D1..D3 or all' % s)
     return list(dict.fromkeys(names))
+
+
+# Where the helix starts (section 3.6 of HITEMU.md). The probes are muons of
+# DISPLACED J/psi candidates (selection: lxy * cos2d / pt * m > 80 um), so the
+# muons come from the dimuon vertex, not from the PV: the helix starts there.
+#   dimuon_vertex : (x0, y0, z0) = (vx, vy, vz), the dimuon Kalman vertex
+#   pv            : (x0, y0) = (pv_x, pv_y), z0 = pv_z + {mu}_dz (until Oct 2026)
+HELIX_ORIGINS = {
+    'dimuon_vertex': dict(branch=['vx=vx', 'vy=vy', 'vz=vz'], z0_from='vz'),
+    'pv':            dict(branch=['vx=pv_x', 'vy=pv_y'], z0_from='dz_pv'),
+}
+
+
+ORIGIN_LABEL = {'dimuon_vertex': 'dimuon vertex', 'pv': 'PV', 'unknown': 'unknown point'}
+
+
+def add_helix_origin_args(p):
+    p.add_argument('--helix-origin', choices=sorted(HELIX_ORIGINS), default='dimuon_vertex',
+                   help='start point of the helix that finds the crossed cells: the dimuon '
+                        'vertex (vx, vy, vz; default) or the PV (pv_x, pv_y, pv_z + {mu}_dz)')
+    p.add_argument('--z0-from', choices=('vz', 'dz_pv'), default=None,
+                   help='expert override of the z of the start point: vz, or pv_z + {mu}_dz '
+                        '(default: from --helix-origin)')
+
+
+def apply_helix_origin(a):
+    """Expand --helix-origin into branch overrides and z0_from. Explicit --branch
+    items and --z0-from win, because they are applied after the origin's."""
+    o = HELIX_ORIGINS[a.helix_origin]
+    a.branch = list(o['branch']) + list(a.branch or [])
+    if a.z0_from is None:
+        a.z0_from = o['z0_from']
+    return a
+
+
+def helix_origin_text(tmpl, z0_from):
+    xy = '(%s, %s)' % (tmpl.get('vx', '0'), tmpl.get('vy', '0'))
+    z = tmpl['vz'] if z0_from == 'vz' else '%s + %s' % (tmpl['pv_z'], tmpl['dz'])
+    return 'x0, y0 = %s, z0 = %s' % (xy, z)
 
 
 def branch_templates(a, surfaces):
@@ -946,6 +988,7 @@ def main():
     a = parse_args()
     info = load_epoch(a)
     surfaces_req = resolve_surfaces(a.surfaces)
+    apply_helix_origin(a)
     tmpl, run_branch, use_mask = branch_templates(a, surfaces_req)
 
     if a.list_branches is not None:
@@ -967,7 +1010,8 @@ def main():
     print('  surfaces : %s' % ', '.join(s.name for s in surfaces))
     print('  muons    : %s, probes need >= %d other valid pixel hits'
           % (', '.join(a.muons), a.min_other_hits))
-    print('  z0       : %s' % ('{mu}_vz' if a.z0_from == 'vz' else 'pv_z + {mu}_dz'))
+    print('  helix    : starts at the %s: %s' % (ORIGIN_LABEL[a.helix_origin],
+                                                     helix_origin_text(tmpl, a.z0_from)))
     if 'charge' not in tmpl:
         warn('no charge branch: helices are straight lines (phi off by up to a few '
              'mm on the disks)')

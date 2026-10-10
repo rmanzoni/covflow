@@ -229,6 +229,7 @@ def main():
     timing = {}
     if km.meta.get('epoch') != a.epoch:
         die('kill maps are for epoch %s, not %s' % (km.meta.get('epoch'), a.epoch))
+    H.check_origin(km.meta, a, 'the kill maps')
     he = H.HitErrors(a.hit_errors) if 'B' in a.route else None
     flows = {}
     if a.flow_dir:

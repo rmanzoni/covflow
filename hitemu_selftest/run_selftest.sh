@@ -15,7 +15,7 @@ TRAINING = dict(tree='tree', selection='(mu1_pt > 3.5) & (abs(mass-3.0969)<0.1)'
 CFG
 python3 hitemu_selftest/gen_fake_masks.py $OUT/fake $N
 CFGF=$OUT/fake/configs/run3_epochs.py
-OLD="--branch vx=pv_x --branch vy=pv_y --branch mask= --branch count="
+OLD="--branch mask= --branch count="
 python3 build_kill_maps.py  --epoch 2026 --config $CFGF --out $OUT/km_masks
 python3 emulate_hit_loss.py --epoch 2026 --config $CFGF --killmaps $OUT/km_masks/killmaps_2026 --closure-only --out $OUT/emu_masks
 python3 build_kill_maps.py  --epoch 2026 --config $CFGF $OLD --out $OUT/km_old

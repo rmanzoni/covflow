@@ -32,13 +32,13 @@ pt, phi0, q, x0, y0 = 0.25, 0.75, +1, 0.6, -0.4          # exaggerated: low pT, 
 x, y, _ = path(pt, 0.5, phi0, q, x0, y0, 0.0, 1.35)
 A.plot(x, y, color=BL, lw=2, label='helix, q > 0 (turns clockwise)')
 A.plot([x0, x0 + 13 * np.cos(phi0)], [y0, y0 + 13 * np.sin(phi0)], color=BL, ls=':', lw=1.2, label='direction φ$_0$ at the start')
-A.plot(x0, y0, 'k*', ms=11, label='start: PV (x$_0$, y$_0$)')
+A.plot(x0, y0, 'k*', ms=11, label='start: dimuon vertex (x$_0$, y$_0$)')
 zc, fc = P.cross_barrel(r1, a(pt), a(0.5), a(phi0), a(q), a(x0), a(y0), a(0.0), B)
 A.plot(r1 * np.cos(fc), r1 * np.sin(fc), 'o', color=RD, ms=8, label='crossing with L1: φ$_L$')
 A.plot([0, r1 * np.cos(fc[0])], [0, r1 * np.sin(fc[0])], color=RD, lw=1)
 A.set_aspect('equal'); A.set_xlim(-6, 17.5); A.set_ylim(-6, 17.5)
 A.set_xlabel('x [cm]'); A.set_ylabel('y [cm]')
-A.set_title('(a) transverse plane: BPix L1–L4\n(curvature exaggerated: p$_T$ = 0.25 GeV, PV offset 7 mm)', fontsize=10.5)
+A.set_title('(a) transverse plane: BPix L1–L4\n(curvature exaggerated: p$_T$ = 0.25 GeV, start 7 mm off the axis)', fontsize=10.5)
 A.legend(fontsize=8.5, loc='upper left', frameon=False)
 
 # (b) r-z view with the real numbers of the two worked examples

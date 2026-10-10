@@ -41,10 +41,10 @@ MASK_BIT = dict(P.MASK_BIT)                     # 'L1'..'L4' -> 0..3, 'D1'..'D3'
 COUNT_BITS = 2                                  # bits per layer in {mu}_pix_hit_count
 PACK_NAMES = list(F.PACK_NAMES)
 
-# The branch set Ric's 2026 runs used: transverse reference point = PV,
-# z0 = pv_z + dz. Overridable with --branch / --z0-from.
-DEFAULT_BRANCH_OVERRIDES = ['vx=pv_x', 'vy=pv_y']
-DEFAULT_Z0_FROM = 'dz_pv'
+# Start point of the helix that finds the crossed cells: --helix-origin,
+# default the dimuon (J/psi) vertex (vx, vy, vz), since the probes come from
+# displaced J/psi. The runs until Oct 2026 used the PV (--helix-origin pv).
+# Expert overrides: --branch / --z0-from, applied after the origin's.
 
 # per-muon branches this module needs on top of pixel_eff_maps.BRANCHES
 EXTRA_TEMPLATES = dict(
@@ -73,9 +73,8 @@ def add_common_args(p, default_config):
                    help='covflow epoch config (default: %(default)s)')
     p.add_argument('--muons', nargs='+', default=['mu1', 'mu2'])
     p.add_argument('--branch', action='append', default=None, metavar='KEY=TEMPLATE',
-                   help='override a branch template (default: %s)'
-                        % ' '.join(DEFAULT_BRANCH_OVERRIDES))
-    p.add_argument('--z0-from', choices=('vz', 'dz_pv'), default=DEFAULT_Z0_FROM)
+                   help='override a branch template (after --helix-origin)')
+    P.add_helix_origin_args(p)
     p.add_argument('--min-other-hits', type=int, default=2,
                    help='probe definition: valid pixel hits besides the one '
                         'on the surface (default: %(default)s)')
@@ -86,10 +85,23 @@ def add_common_args(p, default_config):
     return p
 
 
+def check_origin(meta, a, what):
+    """The cells of kill maps / hit-error fits depend on where the helix starts:
+    the maps and their user must agree. Maps written before Oct 2026 have no
+    helix_origin field; they used the PV (z0_from = dz_pv)."""
+    have = meta.get('helix_origin') or ('pv' if meta.get('z0_from') == 'dz_pv' else 'unknown')
+    want = a.helix_origin
+    if have != want:
+        die('%s were made with the helix starting at the %s, this run starts it at the %s:\n'
+            '  rebuild them, or pass --helix-origin %s'
+            % (what, P.ORIGIN_LABEL[have], P.ORIGIN_LABEL[want], have))
+
+
 def resolve_branches(a, need_cov=False, need_bs=False):
     """(per-muon templates, run branch). Fail-loud on unknown keys."""
-    if a.branch is None:
-        a.branch = list(DEFAULT_BRANCH_OVERRIDES)
+    if not getattr(a, '_origin_applied', False):
+        P.apply_helix_origin(a)
+        a._origin_applied = True
     base_items, extra = [], dict(EXTRA_TEMPLATES)
     for item in a.branch:
         key, sep, val = item.partition('=')
@@ -100,6 +112,10 @@ def resolve_branches(a, need_cov=False, need_bs=False):
     a2 = type('A', (), {})()
     a2.branch, a2.z0_from = base_items, a.z0_from
     tmpl, run_branch, _ = P.branch_templates(a2, ['L1', 'D1'])
+    if not getattr(a, '_origin_printed', False):
+        print('helix start point: the %s, %s' % (P.ORIGIN_LABEL[a.helix_origin],
+                                                  P.helix_origin_text(tmpl, a.z0_from)))
+        a._origin_printed = True
     for k in ('n_pix_b', 'n_pix_e'):
         if not extra[k]:
             die('branch %r is required' % k)
