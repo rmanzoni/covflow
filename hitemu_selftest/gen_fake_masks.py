@@ -62,11 +62,15 @@ def sample(n, is_data, seed):
     run = rng.integers(380000, 380200, n) if is_data else np.ones(n, np.int64)
     pv_z = rng.normal(0.0 if is_data else 0.4, 3.8 if is_data else 3.6, n)
     d['pv_x'] = np.full(n, 0.01); d['pv_y'] = np.full(n, -0.02); d['pv_z'] = pv_z
-    # displaced dimuon vertex: both muons start there (the helix origin by default)
-    lxy = rng.exponential(0.05, n); fv = rng.uniform(-np.pi, np.pi, n)
+    # dimuon vertex: both muons start there. Data: 70% prompt (vertex at the PV,
+    # within resolution), 30% non-prompt; MC: non-prompt only (as the Hb MC)
+    prompt = (rng.random(n) < 0.7) if is_data else np.zeros(n, bool)
+    lxy = np.where(prompt, np.abs(rng.normal(0, 0.003, n)), rng.exponential(0.05, n))
+    fv = rng.uniform(-np.pi, np.pi, n)
     vx = d['pv_x'] + lxy * np.cos(fv); vy = d['pv_y'] + lxy * np.sin(fv)
-    vz = pv_z + rng.normal(0, 0.02, n)
+    vz = pv_z + np.where(prompt, rng.normal(0, 0.003, n), rng.normal(0, 0.02, n))
     d['vx'], d['vy'], d['vz'] = vx, vy, vz
+    d['lxy'], d['cos2d'], d['pt'] = lxy, np.ones(n), np.full(n, 3.0969 / 0.008 * 0.05)
     d['run'] = run
     d['mass'] = 3.0969 + 0.03 * rng.normal(size=n)
     t = (run - 380000) / 200.0
@@ -117,7 +121,11 @@ def sample(n, is_data, seed):
         d[mu + '_bs_dxy_e'] = np.sqrt(sdxy ** 2 + (5e-4) ** 2)
         d[mu + '_best_trk_pt'] = pt; d[mu + '_pt'] = pt
         d[mu + '_best_trk_eta'] = eta; d[mu + '_eta'] = eta
-        d[mu + '_phi'] = phi; d[mu + '_charge'] = q; d[mu + '_dz'] = z0 - pv_z
+        d[mu + '_phi'] = phi; d[mu + '_charge'] = q
+        # impact parameters w.r.t. the PV, CMSSW straight-line convention
+        ddx, ddy = vx - d['pv_x'], vy - d['pv_y']
+        d[mu + '_dxy'] = -ddx * np.sin(phi) + ddy * np.cos(phi)
+        d[mu + '_dz'] = (z0 - pv_z) - (ddx * np.cos(phi) + ddy * np.sin(phi)) * np.sinh(eta)
         d[mu + '_n_pix_b_hit'] = nb; d[mu + '_n_pix_e_hit'] = ne; d[mu + '_n_pix_hit'] = nb + ne
         d[mu + '_pix_first_b_layer'] = fb; d[mu + '_pix_first_e_disk'] = fe
         d[mu + '_n_pix_layer'] = nlay; d[mu + '_pix_first_layer'] = code

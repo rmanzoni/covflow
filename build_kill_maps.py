@@ -83,6 +83,18 @@ def parse_args():
                         "such as L1 L2 D1+ D1-")
     p.add_argument('--lumi-csv', default=None,
                    help='brilcalc csv with recorded luminosity per run')
+    p.add_argument('--drop-cut', nargs='+', default=[], metavar='BRANCH',
+                   help="drop the top-level '&' terms of the epoch's selections that use any "
+                        "of these branches, e.g. --drop-cut lxy (the decay-length cut: prompt "
+                        "J/psi become probes too; HITEMU 3.7)")
+    p.add_argument('--data-extra', default=None, metavar='EXPR',
+                   help="AND this to the data selection, e.g. the prompt / non-prompt split "
+                        "of HITEMU 3.7")
+    p.add_argument('--mc-extra', default=None, metavar='EXPR',
+                   help='AND this to the MC selection')
+    p.add_argument('--ranges-from', default=None, metavar='STEM',
+                   help='reuse the run ranges of another kill-map build (killmaps_<epoch> '
+                        'stem), so that two builds can be compared range by range')
     p.add_argument('--out', default=None, help='default: killmaps_<epoch>')
     p.add_argument('--png', action='store_true')
     return p.parse_args()
@@ -115,10 +127,65 @@ def choose_surfaces(req, tmpl):
     return [s for s in H.ALL_SURFACES if s in req]
 
 
+def drop_terms_using(expr, branches):
+    """Remove the top-level '&' terms of `expr` that use any of `branches`
+    (same rule as covflow's data.drop_terms_using: a term inside an '|' is kept)."""
+    import ast
+    terms, stack = [], [ast.parse(expr, mode='eval').body]
+    while stack:
+        nd = stack.pop()
+        if isinstance(nd, ast.BinOp) and isinstance(nd.op, ast.BitAnd):
+            stack += [nd.right, nd.left]
+        else:
+            terms.append(ast.unparse(nd))
+    keep = [t for t in terms if not (P.selection_branches(t) & set(branches))]
+    dropped = [t for t in terms if t not in keep]
+    return ' & '.join('(%s)' % t for t in keep), dropped
+
+
+def adjust_selection(info, a):
+    """--drop-cut / --data-extra / --mc-extra: the probe selection of the kill
+    maps may differ from the covflow training selection (HITEMU 3.7). The
+    selections actually used are printed and stored in the maps."""
+    if a.drop_cut:
+        dropped_all = []
+        for key in ('selection', 'data_selection', 'mc_selection'):
+            if info.get(key):
+                new, dropped = drop_terms_using(info[key], a.drop_cut)
+                info[key] = new or ''
+                dropped_all += ['%s: %s' % (key, t) for t in dropped]
+        if not dropped_all:
+            die('--drop-cut %s: no top-level selection term uses these branches'
+                % ' '.join(a.drop_cut))
+        for t in dropped_all:
+            print('selection: dropped %s' % t)
+    for key, extra in (('data_selection', a.data_extra), ('mc_selection', a.mc_extra)):
+        if extra:
+            info[key] = ' & '.join('(%s)' % e for e in (info.get(key), extra) if e)
+    if a.drop_cut or a.data_extra or a.mc_extra:
+        print('selection used: common  %s' % (info['selection'] or '(none)'))
+        print('                data    %s' % (info.get('data_selection') or '(none)'))
+        print('                MC      %s' % (info.get('mc_selection') or '(none)'))
+
+
+def segments_from(stem, runs):
+    """Run ranges of another build, as (i, j) slices of `runs` (sorted)."""
+    other = H.KillMaps.load(stem)
+    ranges = [tuple(int(x) for x in r) for r in other.ranges]
+    first = np.array([r[0] for r in ranges])
+    idx = np.clip(np.searchsorted(first, runs, side='right') - 1, 0, len(ranges) - 1)
+    segs = []
+    for k in range(len(ranges)):
+        hit = np.nonzero(idx == k)[0]
+        segs.append((int(hit[0]), int(hit[-1]) + 1) if len(hit) else (0, 0))
+    return segs, ranges
+
+
 def main():
     a = parse_args()
     t0 = time.time()
     info = P.load_epoch(a)
+    adjust_selection(info, a)
     tmpl, run_branch = H.resolve_branches(a)
     tmpl = H.drop_missing_optional(tmpl, [info['data'], info['mc']], info['tree'], a.muons)
     surfaces = choose_surfaces(a.surfaces, tmpl)
@@ -171,8 +238,13 @@ def main():
     min_den = a.min_cell_probes * n_cells
     num = {'L1': tab[:, 2], 'D1': tab[:, 4]}
     den = {'L1': tab[:, 1], 'D1': tab[:, 3]}
-    segs, gains = H.segment_runs(runs, num, den, min_den, a.max_ranges, a.min_gain)
-    ranges = [(int(runs[i]), int(runs[j - 1])) for i, j in segs]
+    if a.ranges_from:
+        segs, ranges = segments_from(a.ranges_from, runs)
+        gains = []
+        print('\n    run ranges taken from %s' % a.ranges_from)
+    else:
+        segs, gains = H.segment_runs(runs, num, den, min_den, a.max_ranges, a.min_gain)
+        ranges = [(int(runs[i]), int(runs[j - 1])) for i, j in segs]
     if a.lumi_csv:
         lumi_run = H.read_lumi_csv(a.lumi_csv)
         missing = [r for r in runs if r not in lumi_run]
@@ -190,7 +262,7 @@ def main():
     print('    %-3s %-15s %6s %12s %8s %8s' % ('#', 'runs', 'share', 'L1 probes', 'eps L1', 'eps D1'))
     for k, (i, j) in enumerate(segs):
         print('    %-3d %6d-%-8d %6.3f %12d %8.4f %8.4f'
-              % (k, runs[i], runs[j - 1], lumi[k] / lumi.sum(), tab[i:j, 1].sum(),
+              % (k, ranges[k][0], ranges[k][1], lumi[k] / lumi.sum(), tab[i:j, 1].sum(),
                  tab[i:j, 2].sum() / max(tab[i:j, 1].sum(), 1),
                  tab[i:j, 4].sum() / max(tab[i:j, 3].sum(), 1)))
     R = len(ranges)
@@ -252,6 +324,8 @@ def main():
                 branches=tmpl, z0_from=a.z0_from, helix_origin=a.helix_origin,
                 min_other_hits=a.min_other_hits,
                 selection=info['selection'], mc_selection=info['mc_selection'],
+                data_selection=info.get('data_selection', ''), drop_cut=a.drop_cut,
+                ranges_from=a.ranges_from,
                 mc_weight=info['mc_weight'], max_events=a.max_events,
                 per_run=dict(runs=runs.tolist(), events=tab[:, 0].tolist(),
                              L1_probes=tab[:, 1].tolist(), L1_hits=tab[:, 2].tolist(),

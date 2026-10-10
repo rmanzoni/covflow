@@ -48,6 +48,13 @@ set EXTRA_HITERR = ()
 # if the maps and the run disagree. Old behaviour: --helix-origin pv
 set OPTS = (--helix-origin dimuon_vertex)
 
+# extra options for step 1 only (build_kill_maps.py): the probe selection.
+# Default: the covflow selection of configs/run3_epochs.py (non-prompt J/psi).
+# To use prompt J/psi as probes too (HITEMU 3.7; check first with
+# run_probe_split.csh that both samples see the same efficiencies):
+#   set KM_OPTS = (--drop-cut lxy)
+set KM_OPTS = ()
+
 # ------------------------------------------------------------------ checks
 if ( $#argv > 0 ) set EPOCHS = ($argv)
 if ( ! -d $REPO ) then
@@ -101,6 +108,7 @@ echo " repo    : $REPO"
 echo " flows   : $RUNS/<epoch>/<mu>/task_0"
 echo " python  : `which python`"
 echo " options : $OPTS"
+echo " step 1  : $KM_OPTS"
 echo " started : `date`"
 echo "============================================================"
 
@@ -120,7 +128,7 @@ foreach ep ($EPOCHS)
     echo ""
     echo "=== $ep  [1/4] kill maps   `date '+%H:%M:%S'`"
     rm -f $KM.json
-    python build_kill_maps.py --epoch $ep $OPTS --out $OUT/killmaps |& tee hitemu/logs/${ep}_1_killmaps.log
+    python build_kill_maps.py --epoch $ep $OPTS $KM_OPTS --out $OUT/killmaps |& tee hitemu/logs/${ep}_1_killmaps.log
     if ( -f $KM.json ) then
         set R1 = OK
     else

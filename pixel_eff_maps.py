@@ -113,8 +113,9 @@ BRANCHES = dict(
     vx='vx',                        # optional (0 if empty)
     vy='vy',                        # optional (0 if empty)
     vz='vz',                        # z0 with --z0-from vz
-    dz='{mu}_dz',                   # only with --z0-from dz_pv
-    pv_z='pv_z',                    # only with --z0-from dz_pv
+    dz='{mu}_dz',                   # 'pv' and 'track' origins: dz w.r.t. the PV
+    dxy='{mu}_dxy',                 # 'track' origin: dxy w.r.t. the PV
+    pv_z='pv_z',                    # 'pv' and 'track' origins
     n_pix='{mu}_n_pix_hit',         # covflow context
     first_b='{mu}_pix_first_b_layer',
     first_e='{mu}_pix_first_e_disk',
@@ -257,22 +258,29 @@ def resolve_surfaces(names):
 # muons come from the dimuon vertex, not from the PV: the helix starts there.
 #   dimuon_vertex : (x0, y0, z0) = (vx, vy, vz), the dimuon Kalman vertex
 #   pv            : (x0, y0) = (pv_x, pv_y), z0 = pv_z + {mu}_dz (until Oct 2026)
+#   track         : the track's own point of closest approach to the PV,
+#                   (pv_x - dxy sin phi, pv_y + dxy cos phi, pv_z + dz), with dxy,
+#                   dz of the best track w.r.t. the PV: a point ON the track,
+#                   valid for prompt and non-prompt probes alike
 HELIX_ORIGINS = {
     'dimuon_vertex': dict(branch=['vx=vx', 'vy=vy', 'vz=vz'], z0_from='vz'),
     'pv':            dict(branch=['vx=pv_x', 'vy=pv_y'], z0_from='dz_pv'),
+    'track':         dict(branch=['vx=pv_x', 'vy=pv_y'], z0_from='track'),
 }
 
 
-ORIGIN_LABEL = {'dimuon_vertex': 'dimuon vertex', 'pv': 'PV', 'unknown': 'unknown point'}
+ORIGIN_LABEL = {'dimuon_vertex': 'dimuon vertex', 'pv': 'PV',
+                'track': "track's closest approach to the PV", 'unknown': 'unknown point'}
 
 
 def add_helix_origin_args(p):
     p.add_argument('--helix-origin', choices=sorted(HELIX_ORIGINS), default='dimuon_vertex',
                    help='start point of the helix that finds the crossed cells: the dimuon '
-                        'vertex (vx, vy, vz; default) or the PV (pv_x, pv_y, pv_z + {mu}_dz)')
-    p.add_argument('--z0-from', choices=('vz', 'dz_pv'), default=None,
-                   help='expert override of the z of the start point: vz, or pv_z + {mu}_dz '
-                        '(default: from --helix-origin)')
+                        'vertex (vx, vy, vz; default), the PV (pv_x, pv_y, pv_z + {mu}_dz), or '
+                        "the track's own closest approach to the PV (track)")
+    p.add_argument('--z0-from', choices=('vz', 'dz_pv', 'track'), default=None,
+                   help='expert override of the start point: vz, pv_z + {mu}_dz, or the '
+                        "track's closest approach (default: from --helix-origin)")
 
 
 def apply_helix_origin(a):
@@ -286,6 +294,9 @@ def apply_helix_origin(a):
 
 
 def helix_origin_text(tmpl, z0_from):
+    if z0_from == 'track':
+        return ('(%s - %s sin phi, %s + %s cos phi, %s + %s)'
+                % (tmpl['vx'], tmpl['dxy'], tmpl['vy'], tmpl['dxy'], tmpl['pv_z'], tmpl['dz']))
     xy = '(%s, %s)' % (tmpl.get('vx', '0'), tmpl.get('vy', '0'))
     z = tmpl['vz'] if z0_from == 'vz' else '%s + %s' % (tmpl['pv_z'], tmpl['dz'])
     return 'x0, y0 = %s, z0 = %s' % (xy, z)
@@ -300,7 +311,7 @@ def branch_templates(a, surfaces):
         br[key] = val
     needs_mask = any(s not in ('L1', 'D1') for s in surfaces)
     used = ['pt', 'eta', 'phi', 'charge', 'vx', 'vy', 'n_pix', 'first_b', 'first_e']
-    used += ['vz'] if a.z0_from == 'vz' else ['dz', 'pv_z']
+    used += {'vz': ['vz'], 'dz_pv': ['dz', 'pv_z'], 'track': ['dz', 'pv_z', 'dxy']}[a.z0_from]
     if needs_mask:
         used += ['mask', 'count']
     tmpl = {k: br[k] for k in used if br[k]}
@@ -567,6 +578,14 @@ def muon_view(arr, mu, tmpl, z0_from, sel):
         v['z0'] = g('vz')
     else:
         v['z0'] = g('dz') + np.asarray(arr[tmpl['pv_z']], np.float64)[sel]
+    if z0_from == 'track':
+        # CMSSW: dxy(P) = -(x_ref - P_x) sin(phi) + (y_ref - P_y) cos(phi), so the
+        # point of the track closest to P lies at P + dxy * (-sin phi, cos phi)
+        if 'vx' not in tmpl or 'vy' not in tmpl:
+            die("--helix-origin track needs the PV position (vx=pv_x, vy=pv_y)")
+        d = g('dxy')
+        v['x0'] = v['x0'] - d * np.sin(v['phi'])
+        v['y0'] = v['y0'] + d * np.cos(v['phi'])
     for key in ('mask', 'count'):
         if key in tmpl:
             m = g(key)
