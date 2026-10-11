@@ -85,23 +85,35 @@ def add_common_args(p, default_config):
     return p
 
 
-def check_origin(meta, a, what):
+def meta_origin(meta, sample):
+    """Helix origin of `sample` ('data' / 'mc') in the meta of kill maps / fits.
+    Per-sample since Oct 2026 (helix_origin_data / _mc); before that one
+    helix_origin for both; before that none (PV start, z0_from = dz_pv)."""
+    return (meta.get('helix_origin_' + sample) or meta.get('helix_origin')
+            or ('pv' if meta.get('z0_from') == 'dz_pv' else 'unknown'))
+
+
+def check_origin(meta, a, what, samples=('data', 'mc')):
     """The cells of kill maps / hit-error fits depend on where the helix starts:
-    the maps and their user must agree. Maps written before Oct 2026 have no
-    helix_origin field; they used the PV (z0_from = dz_pv)."""
-    have = meta.get('helix_origin') or ('pv' if meta.get('z0_from') == 'dz_pv' else 'unknown')
-    want = a.helix_origin
-    if have != want:
-        die('%s were made with the helix starting at the %s, this run starts it at the %s:\n'
-            '  rebuild them, or pass --helix-origin %s'
-            % (what, P.ORIGIN_LABEL[have], P.ORIGIN_LABEL[want], have))
+    the maps and their user must agree, sample by sample."""
+    P.apply_helix_origin(a)
+    for smp in samples:
+        have, want = meta_origin(meta, smp), a.origin[smp]
+        if have != want:
+            die('%s were made with the %s helix starting at the %s, this run uses the %s:\n'
+                '  rebuild them, or pass --helix-origin-%s %s'
+                % (what, smp, P.ORIGIN_LABEL.get(have, have), P.ORIGIN_LABEL[want], smp, have))
+        if want == 'pv_or_vertex':
+            cut = meta.get('origin_sig_cut')
+            if cut is not None and abs(cut - a.origin_sig_cut) > 1e-9:
+                die('%s switch from the PV to the dimuon vertex at lxy_sig = %g, this run at '
+                    '%g: pass --origin-sig-cut %g' % (what, cut, a.origin_sig_cut, cut))
 
 
-def resolve_branches(a, need_cov=False, need_bs=False):
-    """(per-muon templates, run branch). Fail-loud on unknown keys."""
-    if not getattr(a, '_origin_applied', False):
-        P.apply_helix_origin(a)
-        a._origin_applied = True
+def resolve_branches(a, need_cov=False, need_bs=False, sample='data'):
+    """(per-muon Templates of `sample`, with .origin; run branch). Fail-loud on
+    unknown keys."""
+    P.apply_helix_origin(a)
     base_items, extra = [], dict(EXTRA_TEMPLATES)
     for item in a.branch:
         key, sep, val = item.partition('=')
@@ -110,12 +122,19 @@ def resolve_branches(a, need_cov=False, need_bs=False):
         else:
             base_items.append(item)
     a2 = type('A', (), {})()
-    a2.branch, a2.z0_from = base_items, a.z0_from
-    tmpl, run_branch, _ = P.branch_templates(a2, ['L1', 'D1'])
-    if not getattr(a, '_origin_printed', False):
-        print('helix start point: the %s, %s' % (P.ORIGIN_LABEL[a.helix_origin],
-                                                  P.helix_origin_text(tmpl, a.z0_from)))
-        a._origin_printed = True
+    a2.branch, a2.origin = base_items, a.origin
+    tmpl, run_branch, _ = P.branch_templates(a2, ['L1', 'D1'], sample)
+    printed = a.__dict__.setdefault('_origin_printed', set())
+    if sample not in printed:
+        print('helix start point, %-4s: the %s, %s'
+              % ('data' if sample == 'data' else 'MC', P.ORIGIN_LABEL[tmpl.origin],
+                 P.helix_origin_text(tmpl)))
+        if tmpl.origin == 'pv_or_vertex':
+            print('                         PV below lxy_sig = %g' % a.origin_sig_cut)
+        if tmpl.origin == 'gen':
+            print('                         NOTE: %s, %s, %s are placeholder names'
+                  % (tmpl['gen_vx'], tmpl['gen_vy'], tmpl['gen_vz']))
+        printed.add(sample)
     for k in ('n_pix_b', 'n_pix_e'):
         if not extra[k]:
             die('branch %r is required' % k)
@@ -233,8 +252,8 @@ def iterate(files, tree, branches, a, entries, label, timing=None):
 def muon_view(chunk, mu, tmpl, a, sel):
     """pixel_eff_maps.muon_view plus hit counts, covariance (N,15) if asked,
     and the optional beamspot IP."""
-    v = P.muon_view(chunk, mu, {k: t for k, t in tmpl.items()
-                                if k in P.BRANCHES}, a.z0_from, sel)
+    v = P.muon_view(chunk, mu, {k: t for k, t in tmpl.items() if k in P.BRANCHES},
+                    sel, origin=tmpl.origin, sig_cut=a.origin_sig_cut)
     g = lambda key: np.asarray(chunk[tmpl[key].format(mu=mu)], np.float64)[sel]
     v['n_pix_b'] = g('n_pix_b')
     v['n_pix_e'] = g('n_pix_e')
@@ -251,8 +270,7 @@ def muon_view(chunk, mu, tmpl, a, sel):
 
 
 def good_track(v):
-    return (np.isfinite(v['pt']) & (v['pt'] > 0) & np.isfinite(v['eta'])
-            & np.isfinite(v['phi']) & np.isfinite(v['z0']))
+    return P.good_track(v)
 
 
 # ---------------------------------------------------------------------------
@@ -282,8 +300,8 @@ def in_acceptance(name, x):
 
 def cross_view(name, v, sel=None):
     s = slice(None) if sel is None else sel
-    return cross(name, v['pt'][s], v['eta'][s], v['phi'][s], v['q'][s],
-                 v['x0'][s], v['y0'][s], v['z0'][s])
+    return cross(name, v['hpt'][s], v['heta'][s], v['hphi'][s], v['hq'][s],
+                 v['hx0'][s], v['hy0'][s], v['hz0'][s])
 
 
 def has_hit(name, v):
@@ -762,7 +780,7 @@ def _next_first(v, killed, n_left, first, layers, default):
         return new
     nxt = np.full(len(idx), np.nan)
     if layers is None:          # disks: the track's side
-        side = np.where(v['eta'][idx] >= 0, '+', '-')
+        side = np.where(v['heta'][idx] >= 0, '+', '-')
         for k in (2, 3):
             for sd in ('+', '-'):
                 m = (side == sd) & ~np.isfinite(nxt)

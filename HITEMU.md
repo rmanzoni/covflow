@@ -129,7 +129,7 @@ screen -S hitemu
 tcsh run_hitemu.csh                 # or: tcsh run_hitemu.csh 2024 2025 2026
 ```
 
-`run_hitemu.csh` writes `hitemu/<epoch>/{killmaps,noL1_data,noL1_mc,emu}/`, logs in `hitemu/logs/`, and a summary table at the end.
+`run_hitemu.csh` writes `hitemu/<epoch>/{killmaps,noL1_data,noL1_mc,emu}/`, logs in `hitemu/logs/`, and a summary table at the end. `run_hitemu_allprobes.csh` is the same chain with the kill maps built from all J/ψ (prompt and non-prompt) and one helix start point per sample (section 3.8); it writes to `hitemu_allprobes/`.
 
 ---
 
@@ -300,8 +300,8 @@ With the start point at (x<sub>0</sub>, y<sub>0</sub>) = (0.5, −0.3) mm instea
 - **z<sub>0</sub> moves z<sub>L</sub> one to one**, and an L1 cell is 0.83 cm long: z<sub>0</sub> is essential, which is why it is taken from the fitted vertex, not from the beam spot.
 - **The curvature is a small correction** inside the pixel detector: φ<sub>L</sub> − φ<sub>0</sub> = −q α<sub>L</sub>/2 ≈ −q r<sub>L</sub>/2R, 0.003 rad at 5 GeV on L1 (2.5% of a cell), 0.011 rad on D1 in example 2. The sign of q still matters on L4 and the disks.
 - **Start point = the dimuon vertex** (since October 2026; `--helix-origin dimuon_vertex`, the default of every script). The selection requires a displaced J/ψ (L<sub>xy</sub> cos α · m / p<sub>T</sub> > 80 µm in `configs/run3_epochs.py`, a proper decay length), so the muons do not come from the PV. Starting there misplaces the helix by the muon's transverse impact parameter d<sub>xy</sub> with respect to the PV (only the offset perpendicular to the track matters, not the decay length), typically a few hundred µm. A transverse offset d shifts φ<sub>L</sub> by about d / r<sub>L</sub>: 0.003 rad for 100 µm (2.6% of a cell), 0.03 rad for 1 mm (a quarter of a cell). The vertex resolution, tens of µm, is negligible on this scale. All the results of sections 9 and 10 were made with the PV as start point.
-- **Three start points are available** (`--helix-origin`): `dimuon_vertex` (default), `track` = the track's own closest approach to the PV, (`pv_x` − d<sub>xy</sub> sin φ, `pv_y` + d<sub>xy</sub> cos φ, `pv_z` + `{mu}_dz`), with the best track's d<sub>xy</sub> and dz with respect to the PV, and `pv` (the old choice). `track` is a point on the track itself: it needs no vertex fit and no assumption about where the muon comes from, so it works the same for prompt and non-prompt probes, for single muons and for the bachelor track. On the synthetic sample of the self-test, `track` and `dimuon_vertex` put 99.99% of the L1 probes in the same cell (the residual: CMSSW's d<sub>xy</sub>, dz are straight-line extrapolations); `pv` moves 10% of the non-prompt probes to another φ cell there, an upper bound, because the toy draws the flight direction independently of the muon's.
-- **Kill maps carry their start point.** The cells of a map depend on where the helix starts, so `build_kill_maps.py` stores `helix_origin` in the map, and `emulate_hit_loss.py` / `noL1_data_study.py` stop if the run uses another one. Maps written before October 2026 have no such field and are recognised as PV-based (`z0_from = dz_pv`): rebuild them, or run with `--helix-origin pv` to reproduce the old numbers.
+- **Several start points are available** (`--helix-origin`, or one per sample with `--helix-origin-data` / `--helix-origin-mc`, section 3.8): `dimuon_vertex` (default), `pv_or_vertex` (the PV for candidates that are not displaced, the dimuon vertex for the others), `gen_kin` and `gen` (MC only: the generated trajectory), `track` = the track's own closest approach to the PV, (`pv_x` − d<sub>xy</sub> sin φ, `pv_y` + d<sub>xy</sub> cos φ, `pv_z` + `{mu}_dz`), with the best track's d<sub>xy</sub> and dz with respect to the PV, and `pv` (the old choice). `track` is a point on the track itself: it needs no vertex fit and no assumption about where the muon comes from, so it works the same for prompt and non-prompt probes, for single muons and for the bachelor track. On the synthetic sample of the self-test, `track` and `dimuon_vertex` put 99.99% of the L1 probes in the same cell (the residual: CMSSW's d<sub>xy</sub>, dz are straight-line extrapolations); `pv` moves 10% of the non-prompt probes to another φ cell there, an upper bound, because the toy draws the flight direction independently of the muon's.
+- **Kill maps carry their start points.** The cells of a map depend on where the helix starts, so `build_kill_maps.py` stores the start point of each sample in the map (`helix_origin_data`, `helix_origin_mc`, and the switch `origin_sig_cut` of `pv_or_vertex`), and `emulate_hit_loss.py` / `noL1_data_study.py` stop if the run uses another one for a sample they read. Maps written before 11 October 2026 have one `helix_origin` for both samples; maps written before the dimuon-vertex change have none and are recognised as PV-based (`z0_from = dz_pv`): rebuild them, or run with `--helix-origin pv` to reproduce the old numbers.
 - **φ<sub>0</sub> is the muon's φ** (`{mu}_phi`), while p<sub>T</sub> and η are those of the best track; for a muon whose best track is its inner track the two directions coincide.
 - **No multiple scattering or energy loss** before the surface: the deflection by the beam pipe is ~10⁻⁴ rad at 5 GeV, a few µm at L1.
 - **Nominal geometry:** one cylinder per barrel layer and one plane per disk, at the radii and z above (`GEOM` in `pixel_eff_maps.py`, marked "CHECK against the CMSSW geometry"). Real modules are flat and overlap, so the true radius varies by a few mm around the nominal one; a radius error Δr moves z<sub>L</sub> by Δr · sinh η, a fraction of a cell. The data–MC mismatch of ~1.5 mm at the outer edge of D1 (section 9.6) is of this kind.
@@ -342,13 +342,73 @@ The kill maps need less than covflow. ε<sub>data</sub> and ε<sub>MC</sub> of a
 
 | result | meaning | action |
 |---|---|---|
-| χ²/ndf ≈ 1, mean pull ≈ 0, \|pull\| > 3 in at most ~1% of the cells, no pattern in the map | the two samples see the same detector | use all the data as probes: `set KM_OPTS = (--drop-cut lxy)` in `run_hitemu.csh` |
+| χ²/ndf ≈ 1, mean pull ≈ 0, \|pull\| > 3 in at most ~1% of the cells, no pattern in the map | the two samples see the same detector | use all the data as probes: `run_hitemu_allprobes.csh` (section 3.8), or `set KM_OPTS = (--drop-cut lxy)` in `run_hitemu.csh` |
 | χ²/ndf > 1 with a pattern (module edges, a disk side, high \|η\|) | ε depends on the probe kinematics there | keep the non-prompt probes, or reweight the probe p<sub>T</sub>, η per cell before pooling |
 | dead/alive yield closer to 1 for prompt than for non-prompt | the decay-length cut is part of the selection loss of 10.4 | worth knowing for the efficiency systematics of the analysis |
 
 `--drop-cut lxy` removes the decay-length term (every top-level `&` term that uses `lxy`) from the common selection, so the MC map is then built from all of the non-prompt MC, without the cut. `--data-extra` / `--mc-extra` add a term to one sample only. The selections actually used are printed and stored in the maps. The emulation itself (`emulate_hit_loss.py`) keeps the covflow selection: it kills hits in the analysis MC.
 
 Tested on the self-test sample (600k events, 70% prompt in data, non-prompt MC, efficiencies independent of the sample by construction): χ²/ndf of the pulls 0.84–1.08 on the ten surfaces, mean pulls within ±0.06. The pulls use the pooled efficiency of the two builds for their error (a two-proportion test); with few probes per cell their tails are a little wider than Gaussian (|pull| > 3 in 0.1–1.6% of the cells there, with ≥ 10 probes).
+
+### 3.8 All J/ψ as probes: one start point per sample, and the generated trajectory
+
+**What the configuration is.** `run_hitemu_allprobes.csh` runs the whole chain (as `run_hitemu.csh`) with the kill maps built from all the selected J/ψ:
+
+- **selection of the kill maps:** the decay-length cut is dropped in data and MC (`--drop-cut lxy`, step 1 only). Steps 2–4 keep the covflow selection, because they act on the tracks covflow corrects.
+- **data start point** `pv_or_vertex`: the PV, (pv<sub>x</sub>, pv<sub>y</sub>, pv<sub>z</sub> + dz), when the dimuon is not displaced, the dimuon vertex (vx, vy, vz) when it is. The switch is the decay-length significance `lxy_sig` = L<sub>xy</sub> / σ(L<sub>xy</sub>), with respect to the PV, at 3 (`--origin-sig-cut 3`): below it, the dimuon vertex is compatible with the PV within 3σ. A missing `lxy_sig` (failed refit) goes to the dimuon vertex.
+- **MC start point** `dimuon_vertex`: the Hb MC is non-prompt.
+- **output** in `hitemu_allprobes/<epoch>/`, so the default results in `hitemu/` stay.
+
+```tcsh
+screen -S hitemu_ap
+tcsh run_hitemu_allprobes.csh               # or: tcsh run_hitemu_allprobes.csh 2024 2025 2026
+# step 1 alone, one epoch:
+python build_kill_maps.py --epoch 2026 --drop-cut lxy \
+       --helix-origin-data pv_or_vertex --origin-sig-cut 3 --helix-origin-mc dimuon_vertex \
+       --out hitemu_allprobes/2026/killmaps
+```
+
+Steps 2–4 must get the same three origin options (the driver passes them to every step); with others they stop, naming the option to change. The log of step 1 says which fraction of the L1 probes started at the PV (`helix start at the PV: …% of the data L1 probes`), and the first page of `killmaps_<epoch>.pdf` repeats it.
+
+![origins per sample](docs/hitemu_figs/f23_origins_per_sample.png)
+
+*(a) The data start point of `pv_or_vertex`. (b), (c) Self-test: the fraction of L1 probes put in another cell than the one of the true trajectory, per start point, for prompt-like and displaced candidates (`hitemu_selftest/check_origins.py`, 60k toy events; the reco vertex is smeared by 20 µm, the momentum by 1% and 1 mrad). The ~1.6% floor is the reco momentum resolution at the cell edges, the same for every reco start point.*
+
+**What the switch buys, and what it does not.** Read with the figure:
+
+- **Below the cut the PV and the dimuon vertex are, by construction, within ~3σ of each other**, tens of µm: ≲ 1% of a cell. Both are fine for a prompt J/ψ; the cut value (2, 3 or 5) changes the cell of almost no probe.
+- **What really changes the result is the selection**, not the start point: dropping the decay-length cut brings in the prompt J/ψ, i.e. most of the data probes. Their start point only needs to be on the trajectory, and the dimuon vertex already is, for prompt and non-prompt alike. So `dimuon_vertex` everywhere would do as well.
+- **The PV start is slightly worse for a non-prompt J/ψ that falls below the cut** (a short decay length, or a large error). In the toy MC, 1.8% of those probes change cell instead of 1.6% (panel c, `pv` and `pv_or_vertex`, green bars). Real data have such candidates too, but few.
+- **Bookkeeping:** data and MC then start their helices at different points for the same kind of candidate. Since the start points agree within resolution, this has no visible effect, but it is an asymmetry to keep in mind when comparing ε<sub>data</sub> and ε<sub>MC</sub> cell by cell. To measure the effect directly: `compare_killmaps.py <stem A> <stem B> --allow-origin-change` on two builds that differ only in the data start point (and share the same events: then the pulls are not N(0, 1), but every non-zero one is a probe that changed cell).
+
+**The generated trajectory in the MC** (`--helix-origin-mc gen_kin` or `gen`). The MC knows where the muon really went: the generated p<sub>T</sub>, η, φ (`mu{1,2}_gen_pt/eta/phi`, available for every muon matched to a \|pdgId\| = 13 particle, which the MC selection already requires) and the charge, −sign(`mu{1,2}_gen_pdgid`) (13 is the μ⁻). Two variants:
+
+| MC start point | momentum | start point | status |
+|---|---|---|---|
+| `gen_kin` | generated | reco dimuon vertex | runs on the current ntuples |
+| `gen` | generated | generated production vertex: `mu{1,2}_gen_vx/vy/vz` | **placeholder branch names**: the ntuples do not store the generated vertex yet. Change the names in `BRANCHES` of `pixel_eff_maps.py`, or with `--branch gen_vx=… --branch gen_vy=… --branch gen_vz=…`, once the ntuplizer writes them. A missing branch stops the run at the branch check |
+
+The generated quantities only find the crossed cell (keys `hpt`, `heta`, `hphi`, `hq`, `hx0`, `hy0`, `hz0` in `muon_view`); everything else (the context, the covariance, the route B Jacobian) stays reco. The data cannot use them (the scripts refuse).
+
+Is it worth it? In the toy, `gen` puts every MC probe in its true cell, `gen_kin` 99.1%, the reco start points 98.4%. But **the data cells are measured with the reco trajectory**, so ε<sub>data</sub> of a cell is smeared at its edges by the reco resolution while ε<sub>MC</sub> would not be: a dead module with a sharp edge looks a little wider in data than in MC, and P<sub>kill</sub> = 1 − ε<sub>data</sub>/ε<sub>MC</sub> picks up a thin ring of extra kills along the edge. With the reco trajectory in both, the same smearing enters both maps and cancels in the ratio. The effect is the ~1–2% of probes near the cell edges, at most. Hence:
+
+- **default: reco in both** (`dimuon_vertex`): data and MC treated alike;
+- **`gen` / `gen_kin`: a diagnostic.** Build the kill maps twice, differing only in `--helix-origin-mc`, with the same run ranges, and compare them. The data maps are then identical; `compare_killmaps.py` prints, below the data comparison, the MC side: ε<sub>MC</sub> of both builds, the fraction of cells whose ε<sub>MC</sub> moves by more than 0.02, and the average P<sub>kill</sub> (the fraction of MC hits the emulation removes). If P<sub>kill</sub> barely moves, the start point is not an issue. An emulation run must use the same MC origin as its maps (it checks).
+
+For example, with `gen_kin`, which runs on the current ntuples:
+
+```tcsh
+python build_kill_maps.py --epoch 2026 --drop-cut lxy --helix-origin-data pv_or_vertex \
+       --helix-origin-mc dimuon_vertex --out km_mcreco
+python build_kill_maps.py --epoch 2026 --drop-cut lxy --helix-origin-data pv_or_vertex \
+       --helix-origin-mc gen_kin --ranges-from km_mcreco/killmaps_2026 --out km_mcgen
+python compare_killmaps.py km_mcreco/killmaps_2026 km_mcgen/killmaps_2026 \
+       --labels reco gen_kin --out cmp_mcgen
+```
+
+On the toy (`dimuon_vertex` against `gen`, 60k events): ε<sub>MC</sub> per surface identical to 10⁻⁴, about 1% of the cells move by more than 0.02 (the migrations at the edges), and the average P<sub>kill</sub> changes by less than 0.3% of itself on every surface (L1: 0.1154 against 0.1155).
+
+> **Note for later:** to make `gen` usable, store the generated production vertex of each muon in Bmmm (for a B → J/ψ X muon, the B decay vertex: `genParticle.vx(), vy(), vz()` of the matched muon), under the names above or others passed with `--branch`.
 
 ---
 
@@ -1504,7 +1564,8 @@ The second line is identical to route A by construction: f<sub>MC</sub>(C′<sub
 14. **Run ranges** (sections 10.8–10.9): the cap of 8 is binding in 2024–2025, and the split rule looks only at L1. Raise `--max-ranges`, and split on all surfaces once the masks are in.
 15. **Route A pairs tracks through the flow's latent space** (section 7.2.3). In 9 dimensions "the same percentile" is a modelling choice; only the population is tested (dead-cell closure, section 10.13).
 16. **Smearing of D1 losses.** C′<sub>A</sub> − C has large negative eigenvalues for D1 in 2022–2024 (median −5% to −37%). The MC-only C′<sub>MC</sub> − C should not: check in the next run (section 10.13, item 2), and make sure that the D1 kills of those epochs are not smeared with a matrix that is mostly clipped.
-17. **Probe sample for the kill maps.** Prompt J/ψ would make better probes (section 3.7). The test is ready: `run_probe_split.csh` builds the data maps from the prompt and the non-prompt halves of the data with the same run ranges and compares them cell by cell. If they agree, `set KM_OPTS = (--drop-cut lxy)` in `run_hitemu.csh`.
+17. **Probe sample for the kill maps.** Prompt J/ψ would make better probes (section 3.7). The test is ready: `run_probe_split.csh` builds the data maps from the prompt and the non-prompt halves of the data with the same run ranges and compares them cell by cell. If they agree, run `run_hitemu_allprobes.csh` (section 3.8).
+18. **Generated vertex not in the ntuples.** The MC start point `gen` (section 3.8) reads `mu{1,2}_gen_vx/vy/vz`, placeholder names. Bmmm must store the generated production vertex of the matched muon first; `gen_kin` (generated momentum, reco vertex) works already.
 
 ---
 
@@ -1520,15 +1581,20 @@ The second line is identical to route A by construction: f<sub>MC</sub>(C′<sub
 | `noL1_data_study.py` | 4 (+5) | W1/W0/D0, mixture test, fit of route B hit errors → `noL1_<sample>_<epoch>.pdf`, `hiterrors_<sample>_<epoch>.json` |
 | `emulate_hit_loss.py` | 2, 3, 5 | hit killing in MC, per-cell and context closure, routes A/B and their checks, optional emulated MC tree → `emu_<epoch>.pdf/.json` |
 | `run_hitemu.csh` | all | all steps for every epoch, for screen |
-| `compare_killmaps.py` | 1 | two kill-map builds of the same epoch, cell by cell: pulls of the data hit efficiency, selection-loss test (section 3.7) |
+| `compare_killmaps.py` | 1 | two kill-map builds of the same epoch, cell by cell: pulls of the data hit efficiency, selection-loss test (section 3.7); MC hit efficiency and average P<sub>kill</sub> of both (section 3.8) |
 | `run_probe_split.csh` | 1 | prompt vs non-prompt probes: the two builds and their comparison, per epoch (section 3.7) |
+| `run_hitemu_allprobes.csh` | all | as `run_hitemu.csh`, kill maps from all J/ψ (`--drop-cut lxy`), data start point `pv_or_vertex`, MC `dimuon_vertex` (section 3.8); output in `hitemu_allprobes/` |
+| `hitemu_selftest/check_origins.py` | – | self-test of the start points against the true trajectory of the toy samples (run by `run_selftest.sh`) |
 | `pixel_eff_maps.py` | – | geometry and helpers (needs the version with `set_thetalim`) |
 
 ### Main options
 
 | script | option | default | meaning |
 |---|---|---|---|
-| all scripts | `--helix-origin` | `dimuon_vertex` | start point of the helix that finds the crossed cells (section 3.6): `dimuon_vertex` = (`vx`, `vy`, `vz`); `track` = the track's closest approach to the PV, from `pv_x`, `pv_y`, `pv_z`, `{mu}_dxy`, `{mu}_dz`; `pv` = (`pv_x`, `pv_y`, `pv_z` + `{mu}_dz`), the choice until October 2026. The kill maps record it, and the emulation refuses maps made with the other one |
+| all scripts | `--helix-origin` | `dimuon_vertex` | start point of the helix that finds the crossed cells, data and MC (sections 3.6, 3.8): `dimuon_vertex` = (`vx`, `vy`, `vz`); `pv` = (`pv_x`, `pv_y`, `pv_z` + `{mu}_dz`), the choice until October 2026; `track` = the track's closest approach to the PV, from `pv_x`, `pv_y`, `pv_z`, `{mu}_dxy`, `{mu}_dz`; `pv_or_vertex` = `pv` if `lxy_sig` < `--origin-sig-cut`, else `dimuon_vertex`; MC only: `gen_kin` (generated momentum, reco dimuon vertex), `gen` (generated momentum and vertex; placeholder branch names). The kill maps record it per sample, and the emulation refuses maps made with another one |
+| | `--helix-origin-data`, `--helix-origin-mc` | `--helix-origin` | the start point of one sample only |
+| | `--origin-sig-cut` | 3 | `pv_or_vertex`: the PV below this `lxy_sig`, the dimuon vertex above |
+| `compare_killmaps` | `--allow-origin-change` | off | compare builds whose data start points differ (default: refuse) |
 | `build_kill_maps` | `--drop-cut` | – | drop the selection terms that use these branches, e.g. `lxy` (prompt J/ψ become probes, section 3.7) |
 | | `--data-extra`, `--mc-extra` | – | extra selection term for data / MC only |
 | | `--ranges-from` | – | reuse the run ranges of another build (to compare builds range by range) |
@@ -1565,3 +1631,5 @@ hitemu/<epoch>/noL1_mc/{noL1_mc_<epoch>.pdf, hiterrors_mc_<epoch>.json}
 hitemu/<epoch>/emu/{emu_<epoch>.pdf, emu_<epoch>.json [, emu_<epoch>_routeB.root/.json]}
 hitemu/logs/<epoch>_<step>.log, summary_<timestamp>.txt
 ```
+
+`run_hitemu_allprobes.csh` writes the same tree under `hitemu_allprobes/` instead of `hitemu/`.

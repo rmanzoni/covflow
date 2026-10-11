@@ -240,8 +240,12 @@ def main():
             print('loading covflow run %s' % d)
             flows[mu] = H.CovFlow(d, mu, device=a.device)
     tmpl, run_branch = H.resolve_branches(a, need_cov=not a.closure_only,
-                                          need_bs=not a.closure_only)
+                                          need_bs=not a.closure_only, sample='data')
+    tmpl_m, _ = H.resolve_branches(a, need_cov=not a.closure_only,
+                                   need_bs=not a.closure_only, sample='mc')
     tmpl = H.drop_missing_optional(tmpl, [info['data'], info['mc']], info['tree'], a.muons)
+    tmpl_m = H.drop_missing_optional(tmpl_m, [info['data'], info['mc']], info['tree'], a.muons,
+                                     quiet_masks=True)
     has_bs = 'bs_dxy' in tmpl and 'bs_dxy_e' in tmpl
     extra_surf = [s for s in km.surfaces if s not in H.KILL_SURFACES]
     if extra_surf and not H.has_masks(tmpl):
@@ -263,7 +267,7 @@ def main():
             have = set(fh[info['tree']].keys())
         tree_br = [b % mu for mu in a.muons for b in ('%s_n_pix_layer', '%s_pix_first_layer')
                    if b % mu in have]
-    need_m = H.sample_branches(tmpl, a.muons, sel_m,
+    need_m = H.sample_branches(tmpl_m, a.muons, sel_m,
                                ([info['mc_weight']] if info['mc_weight'] else []) + flow_br
                                + tree_br)
     entries = P.preflight({'data': info['data'], 'mc': info['mc']}, info['tree'],
@@ -354,7 +358,7 @@ def main():
         w_ev = np.ones(ns)
         per_mu = {}
         for mu in a.muons:
-            v = H.muon_view(chunk, mu, tmpl, a, sel)
+            v = H.muon_view(chunk, mu, tmpl_m, a, sel)
             good = H.good_track(v)
             e = H.emulate(v, rix, km, rng)
             e['w'] = np.where(good, e['w'], 1.0)

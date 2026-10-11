@@ -67,10 +67,17 @@ def sample(n, is_data, seed):
     prompt = (rng.random(n) < 0.7) if is_data else np.zeros(n, bool)
     lxy = np.where(prompt, np.abs(rng.normal(0, 0.003, n)), rng.exponential(0.05, n))
     fv = rng.uniform(-np.pi, np.pi, n)
+    # TRUE vertex (MC: the gen production vertex of both muons) ...
     vx = d['pv_x'] + lxy * np.cos(fv); vy = d['pv_y'] + lxy * np.sin(fv)
     vz = pv_z + np.where(prompt, rng.normal(0, 0.003, n), rng.normal(0, 0.02, n))
-    d['vx'], d['vy'], d['vz'] = vx, vy, vz
-    d['lxy'], d['cos2d'], d['pt'] = lxy, np.ones(n), np.full(n, 3.0969 / 0.008 * 0.05)
+    # ... and the RECO dimuon vertex: smeared by 20 um (x, y) and 40 um (z)
+    rvx, rvy = vx + rng.normal(0, 0.002, n), vy + rng.normal(0, 0.002, n)
+    rvz = vz + rng.normal(0, 0.004, n)
+    d['vx'], d['vy'], d['vz'] = rvx, rvy, rvz
+    rlxy = np.hypot(rvx - d['pv_x'], rvy - d['pv_y'])
+    d['lxy'], d['cos2d'], d['pt'] = rlxy, np.ones(n), np.full(n, 3.0969 / 0.008 * 0.05)
+    d['lxy_err'] = np.full(n, 0.003)
+    d['lxy_sig'] = rlxy / d['lxy_err']
     d['run'] = run
     d['mass'] = 3.0969 + 0.03 * rng.normal(size=n)
     t = (run - 380000) / 200.0
@@ -79,6 +86,9 @@ def sample(n, is_data, seed):
         phi = rng.uniform(-np.pi, np.pi, n); q = rng.choice([-1., 1.], n)
         z0 = vz
         par = H.helix_to_curv(pt, eta, phi, q, z0)
+        # reco track: the true one smeared (1% in pT, 1 mrad in eta and phi)
+        rpt = pt * (1 + 0.01 * rng.normal(size=n))
+        reta, rphi = eta + 1e-3 * rng.normal(size=n), phi + 1e-3 * rng.normal(size=n)
         info = np.zeros((n, 5, 5))
         qop = par[:, 0]
         for i, s in enumerate([0.01 * np.abs(qop), 2e-3, 2e-3, 0.05, 0.1]):
@@ -119,13 +129,14 @@ def sample(n, is_data, seed):
         sdxy = np.sqrt(C[:, 3, 3])
         d[mu + '_bs_dxy'] = rng.choice([-1, 1], n) * rng.exponential(0.01, n) + sdxy * rng.normal(size=n)
         d[mu + '_bs_dxy_e'] = np.sqrt(sdxy ** 2 + (5e-4) ** 2)
-        d[mu + '_best_trk_pt'] = pt; d[mu + '_pt'] = pt
-        d[mu + '_best_trk_eta'] = eta; d[mu + '_eta'] = eta
-        d[mu + '_phi'] = phi; d[mu + '_charge'] = q
-        # impact parameters w.r.t. the PV, CMSSW straight-line convention
-        ddx, ddy = vx - d['pv_x'], vy - d['pv_y']
-        d[mu + '_dxy'] = -ddx * np.sin(phi) + ddy * np.cos(phi)
-        d[mu + '_dz'] = (z0 - pv_z) - (ddx * np.cos(phi) + ddy * np.sin(phi)) * np.sinh(eta)
+        d[mu + '_best_trk_pt'] = rpt; d[mu + '_pt'] = rpt
+        d[mu + '_best_trk_eta'] = reta; d[mu + '_eta'] = reta
+        d[mu + '_phi'] = rphi; d[mu + '_charge'] = q
+        # impact parameters w.r.t. the PV, CMSSW straight-line convention, of
+        # the reco track through the reco vertex
+        ddx, ddy = rvx - d['pv_x'], rvy - d['pv_y']
+        d[mu + '_dxy'] = -ddx * np.sin(rphi) + ddy * np.cos(rphi)
+        d[mu + '_dz'] = (rvz - pv_z) - (ddx * np.cos(rphi) + ddy * np.sin(rphi)) * np.sinh(reta)
         d[mu + '_n_pix_b_hit'] = nb; d[mu + '_n_pix_e_hit'] = ne; d[mu + '_n_pix_hit'] = nb + ne
         d[mu + '_pix_first_b_layer'] = fb; d[mu + '_pix_first_e_disk'] = fe
         d[mu + '_n_pix_layer'] = nlay; d[mu + '_pix_first_layer'] = code
@@ -133,7 +144,14 @@ def sample(n, is_data, seed):
         d[mu + '_pix_inact_mask'] = imask; d[mu + '_pix_hit_count'] = count
         d[mu + '_id_medium'] = np.ones(n)
         if not is_data:
-            d[mu + '_gen_pdgid'] = np.full(n, 13.)
+            d[mu + '_gen_pdgid'] = -13. * q                 # 13 = mu-
+            d[mu + '_gen_pt'], d[mu + '_gen_eta'], d[mu + '_gen_phi'] = pt, eta, phi
+            # placeholder names of hitemu (pixel_eff_maps.BRANCHES gen_vx, ...)
+            d[mu + '_gen_vx'], d[mu + '_gen_vy'], d[mu + '_gen_vz'] = vx, vy, vz
+        else:   # truth of the toy data, for check_origins.py only (no such thing in real data)
+            for k, val in (('pt', pt), ('eta', eta), ('phi', phi), ('vx', vx), ('vy', vy),
+                           ('vz', vz)):
+                d['%s_truth_%s' % (mu, k)] = val
     if not is_data:
         w = rng.uniform(0.5, 1.5, n); w[:20] = np.nan
         d['pu_weight_2026'] = w

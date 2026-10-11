@@ -112,10 +112,24 @@ BRANCHES = dict(
     # of the Kalman fit, cand.vtx in Bmmm (event branches vx, vy, vz).
     vx='vx',                        # optional (0 if empty)
     vy='vy',                        # optional (0 if empty)
-    vz='vz',                        # z0 with --z0-from vz
-    dz='{mu}_dz',                   # 'pv' and 'track' origins: dz w.r.t. the PV
+    vz='vz',                        # dimuon vertex z
+    pv_x='pv_x',                    # 'pv', 'track', 'pv_or_vertex' origins (0 if empty)
+    pv_y='pv_y',
+    pv_z='pv_z',
+    dz='{mu}_dz',                   # dz of the best track w.r.t. the PV
     dxy='{mu}_dxy',                 # 'track' origin: dxy w.r.t. the PV
-    pv_z='pv_z',                    # 'pv' and 'track' origins
+    lxy_sig='lxy_sig',              # 'pv_or_vertex': L_xy / sigma(L_xy) w.r.t. the PV
+    # MC truth of the muon (gen-matched to |pdgId| = 13), 'gen' and 'gen_kin' origins
+    gen_pt='{mu}_gen_pt',
+    gen_eta='{mu}_gen_eta',
+    gen_phi='{mu}_gen_phi',
+    gen_pdgid='{mu}_gen_pdgid',     # charge = -sign(pdgId): 13 is the mu-
+    # PLACEHOLDER names (Oct 2026): the gen production vertex of the muon (for a
+    # B -> J/psi X muon, the B decay vertex) is NOT in the ntuples yet. Rename
+    # here or with --branch gen_vx=... once the ntuplizer writes it.
+    gen_vx='{mu}_gen_vx',
+    gen_vy='{mu}_gen_vy',
+    gen_vz='{mu}_gen_vz',
     n_pix='{mu}_n_pix_hit',         # covflow context
     first_b='{mu}_pix_first_b_layer',
     first_e='{mu}_pix_first_e_disk',
@@ -123,7 +137,7 @@ BRANCHES = dict(
     count='{mu}_pix_hit_count',     # valid hits per layer, 2 bits each (optional)
     run='run',
 )
-OPTIONAL = {'charge', 'vx', 'vy', 'count'}
+OPTIONAL = {'charge', 'vx', 'vy', 'pv_x', 'pv_y', 'count'}
 
 MASK_BIT = {'L1': 0, 'L2': 1, 'L3': 2, 'L4': 3, 'D1': 4, 'D2': 5, 'D3': 6}
 SELECTION_FUNCS = {'abs': np.abs, 'sqrt': np.sqrt, 'log': np.log, 'exp': np.exp,
@@ -253,56 +267,115 @@ def resolve_surfaces(names):
     return list(dict.fromkeys(names))
 
 
-# Where the helix starts (section 3.6 of HITEMU.md). The probes are muons of
-# DISPLACED J/psi candidates (selection: lxy * cos2d / pt * m > 80 um), so the
-# muons come from the dimuon vertex, not from the PV: the helix starts there.
+# Where the helix starts (section 3.6 of HITEMU.md), and with which momentum.
+# The origin can differ between data and MC (--helix-origin-data / -mc).
 #   dimuon_vertex : (x0, y0, z0) = (vx, vy, vz), the dimuon Kalman vertex
 #   pv            : (x0, y0) = (pv_x, pv_y), z0 = pv_z + {mu}_dz (until Oct 2026)
 #   track         : the track's own point of closest approach to the PV,
 #                   (pv_x - dxy sin phi, pv_y + dxy cos phi, pv_z + dz), with dxy,
 #                   dz of the best track w.r.t. the PV: a point ON the track,
 #                   valid for prompt and non-prompt probes alike
+#   pv_or_vertex  : per candidate, 'pv' if lxy_sig < --origin-sig-cut (the
+#                   dimuon vertex is compatible with the PV: prompt-like), else
+#                   'dimuon_vertex' (displaced). A NaN lxy_sig goes to the vertex.
+#   gen_kin       : MC only. Generated pT, eta, phi and charge of the muon,
+#                   started at the reco dimuon vertex
+#   gen           : MC only. Generated pT, eta, phi, charge AND production
+#                   vertex (gen_vx, gen_vy, gen_vz: PLACEHOLDER branch names)
+# The reco quantities of a track (pt, eta, phi, q, x0, y0, z0 in muon_view) are
+# never replaced: the gen ones go to separate keys (hpt, heta, hphi, hq, hx0,
+# hy0, hz0) used ONLY to find the crossed cells.
 HELIX_ORIGINS = {
-    'dimuon_vertex': dict(branch=['vx=vx', 'vy=vy', 'vz=vz'], z0_from='vz'),
-    'pv':            dict(branch=['vx=pv_x', 'vy=pv_y'], z0_from='dz_pv'),
-    'track':         dict(branch=['vx=pv_x', 'vy=pv_y'], z0_from='track'),
+    'dimuon_vertex': dict(needs=('vx', 'vy', 'vz'), mc_only=False),
+    'pv':            dict(needs=('pv_x', 'pv_y', 'pv_z', 'dz'), mc_only=False),
+    'track':         dict(needs=('pv_x', 'pv_y', 'pv_z', 'dz', 'dxy'), mc_only=False),
+    'pv_or_vertex':  dict(needs=('vx', 'vy', 'vz', 'pv_x', 'pv_y', 'pv_z', 'dz', 'lxy_sig'),
+                          mc_only=False),
+    'gen_kin':       dict(needs=('vx', 'vy', 'vz', 'gen_pt', 'gen_eta', 'gen_phi',
+                                 'gen_pdgid'), mc_only=True),
+    'gen':           dict(needs=('vx', 'vy', 'vz', 'gen_pt', 'gen_eta', 'gen_phi', 'gen_pdgid',
+                                 'gen_vx', 'gen_vy', 'gen_vz'), mc_only=True),
 }
-
+GEN_ORIGINS = ('gen', 'gen_kin')
 
 ORIGIN_LABEL = {'dimuon_vertex': 'dimuon vertex', 'pv': 'PV',
-                'track': "track's closest approach to the PV", 'unknown': 'unknown point'}
+                'track': "track's closest approach to the PV",
+                'pv_or_vertex': 'PV if the dimuon is not displaced, else the dimuon vertex',
+                'gen_kin': 'dimuon vertex, with the GENERATED muon momentum',
+                'gen': 'GENERATED muon production vertex, with the generated momentum',
+                'unknown': 'unknown point'}
+
+
+class Templates(dict):
+    """Branch templates of one sample; .origin is the helix origin of that sample."""
+    origin = 'dimuon_vertex'
 
 
 def add_helix_origin_args(p):
     p.add_argument('--helix-origin', choices=sorted(HELIX_ORIGINS), default='dimuon_vertex',
-                   help='start point of the helix that finds the crossed cells: the dimuon '
-                        'vertex (vx, vy, vz; default), the PV (pv_x, pv_y, pv_z + {mu}_dz), or '
-                        "the track's own closest approach to the PV (track)")
-    p.add_argument('--z0-from', choices=('vz', 'dz_pv', 'track'), default=None,
-                   help='expert override of the start point: vz, pv_z + {mu}_dz, or the '
-                        "track's closest approach (default: from --helix-origin)")
+                   help='start point of the helix that finds the crossed cells, for data AND '
+                        'MC: dimuon_vertex (vx, vy, vz; default), pv (pv_x, pv_y, '
+                        'pv_z + {mu}_dz), track (the track\'s closest approach to the PV), '
+                        'pv_or_vertex (pv if lxy_sig < --origin-sig-cut, else dimuon_vertex), '
+                        'gen_kin / gen (MC only: generated momentum, from the reco dimuon '
+                        'vertex / from the generated vertex)')
+    p.add_argument('--helix-origin-data', choices=sorted(HELIX_ORIGINS), default=None,
+                   help='origin for the data only (default: --helix-origin)')
+    p.add_argument('--helix-origin-mc', choices=sorted(HELIX_ORIGINS), default=None,
+                   help='origin for the MC only (default: --helix-origin)')
+    p.add_argument('--origin-sig-cut', type=float, default=3.0,
+                   help='pv_or_vertex: start at the PV below this decay-length significance '
+                        'lxy_sig, at the dimuon vertex above (default: %(default)s)')
 
 
 def apply_helix_origin(a):
-    """Expand --helix-origin into branch overrides and z0_from. Explicit --branch
-    items and --z0-from win, because they are applied after the origin's."""
-    o = HELIX_ORIGINS[a.helix_origin]
-    a.branch = list(o['branch']) + list(a.branch or [])
-    if a.z0_from is None:
-        a.z0_from = o['z0_from']
+    """Resolve the per-sample origins into a.origin = {'data': ..., 'mc': ...}."""
+    if getattr(a, 'origin', None):
+        return a
+    a.origin = dict(data=a.helix_origin_data or a.helix_origin,
+                    mc=a.helix_origin_mc or a.helix_origin)
+    if HELIX_ORIGINS[a.origin['data']]['mc_only']:
+        die("--helix-origin %s uses the generated muon: MC only. Give the data its own "
+            "origin with --helix-origin-data (e.g. dimuon_vertex)" % a.origin['data'])
+    a.branch = list(a.branch or [])
     return a
 
 
-def helix_origin_text(tmpl, z0_from):
-    if z0_from == 'track':
+def origin_text(a):
+    lab = lambda o: ORIGIN_LABEL[o] + (' (PV below lxy_sig = %g)' % a.origin_sig_cut
+                                       if o == 'pv_or_vertex' else '')
+    o = a.origin
+    if o['data'] == o['mc']:
+        return 'the %s' % lab(o['data'])
+    return 'data: the %s; MC: the %s' % (lab(o['data']), lab(o['mc']))
+
+
+def helix_origin_text(tmpl, origin=None):
+    """The start point and momentum of the helix, in branch names."""
+    origin = origin or tmpl.origin
+    t = lambda k: tmpl.get(k, '0')
+    vtx = '(%s, %s, %s)' % (t('vx'), t('vy'), t('vz'))
+    pv = '(%s, %s, %s + %s)' % (t('pv_x'), t('pv_y'), t('pv_z'), t('dz'))
+    if origin == 'dimuon_vertex':
+        return vtx
+    if origin == 'pv':
+        return pv
+    if origin == 'track':
         return ('(%s - %s sin phi, %s + %s cos phi, %s + %s)'
-                % (tmpl['vx'], tmpl['dxy'], tmpl['vy'], tmpl['dxy'], tmpl['pv_z'], tmpl['dz']))
-    xy = '(%s, %s)' % (tmpl.get('vx', '0'), tmpl.get('vy', '0'))
-    z = tmpl['vz'] if z0_from == 'vz' else '%s + %s' % (tmpl['pv_z'], tmpl['dz'])
-    return 'x0, y0 = %s, z0 = %s' % (xy, z)
+                % (t('pv_x'), t('dxy'), t('pv_y'), t('dxy'), t('pv_z'), t('dz')))
+    if origin == 'pv_or_vertex':
+        return '%s if %s < cut, else %s' % (pv, t('lxy_sig'), vtx)
+    gen_p = 'momentum (%s, %s, %s), charge -sign(%s)' % (t('gen_pt'), t('gen_eta'),
+                                                         t('gen_phi'), t('gen_pdgid'))
+    if origin == 'gen_kin':
+        return '%s, %s' % (vtx, gen_p)
+    return '(%s, %s, %s), %s' % (t('gen_vx'), t('gen_vy'), t('gen_vz'), gen_p)
 
 
-def branch_templates(a, surfaces):
+def branch_templates(a, surfaces, sample='data'):
+    """(Templates of `sample` with .origin set, run branch, needs_mask)."""
+    apply_helix_origin(a)
+    origin = a.origin[sample]
     br = dict(BRANCHES)
     for item in a.branch:
         key, sep, val = item.partition('=')
@@ -310,11 +383,12 @@ def branch_templates(a, surfaces):
             die('--branch %r: expected KEY=TEMPLATE with KEY in %s' % (item, sorted(br)))
         br[key] = val
     needs_mask = any(s not in ('L1', 'D1') for s in surfaces)
-    used = ['pt', 'eta', 'phi', 'charge', 'vx', 'vy', 'n_pix', 'first_b', 'first_e']
-    used += {'vz': ['vz'], 'dz_pv': ['dz', 'pv_z'], 'track': ['dz', 'pv_z', 'dxy']}[a.z0_from]
+    used = ['pt', 'eta', 'phi', 'charge', 'n_pix', 'first_b', 'first_e']
+    used += [k for k in HELIX_ORIGINS[origin]['needs'] if k not in used]
     if needs_mask:
         used += ['mask', 'count']
-    tmpl = {k: br[k] for k in used if br[k]}
+    tmpl = Templates({k: br[k] for k in used if br[k]})
+    tmpl.origin = origin
     for k in used:
         if not br[k] and k not in OPTIONAL:
             die('branch %r is required and cannot be disabled' % k)
@@ -459,11 +533,11 @@ class Surface:
 
     def crossing(self, v, bfield):
         if self.kind == 'L':
-            return cross_barrel(GEOM['BPIX_R'][self.index], v['pt'], v['eta'],
-                                v['phi'], v['q'], v['x0'], v['y0'], v['z0'], bfield)
+            return cross_barrel(GEOM['BPIX_R'][self.index], v['hpt'], v['heta'],
+                                v['hphi'], v['hq'], v['hx0'], v['hy0'], v['hz0'], bfield)
         z_d = self.side * GEOM['FPIX_Z'][self.index]
-        return cross_disk(z_d, v['pt'], v['eta'], v['phi'], v['q'], v['x0'],
-                          v['y0'], v['z0'], bfield)
+        return cross_disk(z_d, v['hpt'], v['heta'], v['hphi'], v['hq'], v['hx0'],
+                          v['hy0'], v['hz0'], bfield)
 
     def in_acceptance(self, x):
         if self.kind == 'L':
@@ -565,32 +639,66 @@ def preflight(files_by_sample, tree, needed_by_sample):
     return entries
 
 
-def muon_view(arr, mu, tmpl, z0_from, sel):
-    """Per-muon arrays for the selected events, as float64."""
+def muon_view(arr, mu, tmpl, sel, origin=None, sig_cut=3.0):
+    """Per-muon arrays for the selected events, as float64.
+
+    pt, eta, phi, q, x0, y0, z0 : the reco track and the reco start point
+    hpt, heta, hphi, hq, hx0, hy0, hz0 : what the helix of the crossing uses
+        (the same arrays, except for the gen origins)
+    from_pv : True where the helix starts at the PV (pv, track, pv_or_vertex)"""
+    origin = origin or tmpl.origin
     g = lambda key: np.asarray(arr[tmpl[key].format(mu=mu)], dtype=np.float64)[sel]
     n = int(sel.sum())
+    opt = lambda key: g(key) if key in tmpl else np.zeros(n)
     v = dict(pt=g('pt'), eta=g('eta'), phi=g('phi'),
              n_pix=g('n_pix'), first_b=g('first_b'), first_e=g('first_e'))
     v['q'] = np.sign(g('charge')) if 'charge' in tmpl else np.zeros(n)
-    v['x0'] = g('vx') if 'vx' in tmpl else np.zeros(n)
-    v['y0'] = g('vy') if 'vy' in tmpl else np.zeros(n)
-    if z0_from == 'vz':
-        v['z0'] = g('vz')
+    if origin in ('pv', 'track', 'pv_or_vertex'):
+        px, py, pz = opt('pv_x'), opt('pv_y'), g('pv_z') + g('dz')
+        if origin == 'track':
+            # CMSSW: dxy(P) = -(x_ref - P_x) sin(phi) + (y_ref - P_y) cos(phi), so the
+            # point of the track closest to P lies at P + dxy * (-sin phi, cos phi)
+            if 'pv_x' not in tmpl or 'pv_y' not in tmpl:
+                die("--helix-origin track needs the PV position (pv_x, pv_y)")
+            d = g('dxy')
+            px, py = px - d * np.sin(v['phi']), py + d * np.cos(v['phi'])
+    if origin in ('pv', 'track'):
+        v['x0'], v['y0'], v['z0'] = px, py, pz
+        v['from_pv'] = np.ones(n, bool)
     else:
-        v['z0'] = g('dz') + np.asarray(arr[tmpl['pv_z']], np.float64)[sel]
-    if z0_from == 'track':
-        # CMSSW: dxy(P) = -(x_ref - P_x) sin(phi) + (y_ref - P_y) cos(phi), so the
-        # point of the track closest to P lies at P + dxy * (-sin phi, cos phi)
-        if 'vx' not in tmpl or 'vy' not in tmpl:
-            die("--helix-origin track needs the PV position (vx=pv_x, vy=pv_y)")
-        d = g('dxy')
-        v['x0'] = v['x0'] - d * np.sin(v['phi'])
-        v['y0'] = v['y0'] + d * np.cos(v['phi'])
+        v['x0'], v['y0'], v['z0'] = opt('vx'), opt('vy'), g('vz')
+        v['from_pv'] = np.zeros(n, bool)
+    if origin == 'pv_or_vertex':
+        with np.errstate(invalid='ignore'):
+            use = g('lxy_sig') < sig_cut
+        v['x0'] = np.where(use, px, v['x0'])
+        v['y0'] = np.where(use, py, v['y0'])
+        v['z0'] = np.where(use, pz, v['z0'])
+        v['from_pv'] = use
+    for k in ('pt', 'eta', 'phi', 'q', 'x0', 'y0', 'z0'):
+        v['h' + k] = v[k]
+    if origin in GEN_ORIGINS:
+        v['hpt'], v['heta'], v['hphi'] = g('gen_pt'), g('gen_eta'), g('gen_phi')
+        v['hq'] = -np.sign(g('gen_pdgid'))
+        if origin == 'gen':
+            v['hx0'], v['hy0'], v['hz0'] = g('gen_vx'), g('gen_vy'), g('gen_vz')
     for key in ('mask', 'count'):
         if key in tmpl:
             m = g(key)
             v[key] = np.where(np.isfinite(m), m, 0).astype(np.int64)
     return v
+
+
+def good_track(v):
+    """Finite reco track, and finite helix inputs for the crossing."""
+    ok = np.isfinite(v['pt']) & (v['pt'] > 0) & np.isfinite(v['eta']) \
+        & np.isfinite(v['phi']) & np.isfinite(v['z0'])
+    if v['hpt'] is not v['pt'] or v['hz0'] is not v['z0']:
+        with np.errstate(invalid='ignore'):
+            ok &= np.isfinite(v['hpt']) & (v['hpt'] > 0) & np.isfinite(v['heta']) \
+                & np.isfinite(v['hphi']) & np.isfinite(v['hx0']) & np.isfinite(v['hy0']) \
+                & np.isfinite(v['hz0'])
+    return ok
 
 
 def has_hit(v, surf, use_mask):
@@ -672,9 +780,8 @@ def process_sample(sample, files, info, tmpl, run_branch, a, surfaces, use_mask,
         res['n_selected'] += int(sel.sum())
 
         for mu in a.muons:
-            v = muon_view(chunk, mu, tmpl, a.z0_from, sel)
-            good = (np.isfinite(v['pt']) & (v['pt'] > 0) & np.isfinite(v['eta'])
-                    & np.isfinite(v['phi']) & np.isfinite(v['z0']))
+            v = muon_view(chunk, mu, tmpl, sel, sig_cut=a.origin_sig_cut)
+            good = good_track(v)
             res['z0'] += np.histogram(v['z0'][good], bins=Z0_EDGES, weights=w_ev[good])[0]
             for s in surfaces:
                 x, y = s.crossing(v, GEOM['B_FIELD'])
@@ -1008,7 +1115,8 @@ def main():
     info = load_epoch(a)
     surfaces_req = resolve_surfaces(a.surfaces)
     apply_helix_origin(a)
-    tmpl, run_branch, use_mask = branch_templates(a, surfaces_req)
+    tmpl, run_branch, use_mask = branch_templates(a, surfaces_req, 'data')
+    tmpl_mc, _, _ = branch_templates(a, surfaces_req, 'mc')
 
     if a.list_branches is not None:
         list_branches(info['data'], info['tree'], a.list_branches)
@@ -1029,24 +1137,28 @@ def main():
     print('  surfaces : %s' % ', '.join(s.name for s in surfaces))
     print('  muons    : %s, probes need >= %d other valid pixel hits'
           % (', '.join(a.muons), a.min_other_hits))
-    print('  helix    : starts at the %s: %s' % (ORIGIN_LABEL[a.helix_origin],
-                                                     helix_origin_text(tmpl, a.z0_from)))
+    print('  helix    : %s' % origin_text(a))
+    print('             data %s' % helix_origin_text(tmpl))
+    print('             MC   %s' % helix_origin_text(tmpl_mc))
     if 'charge' not in tmpl:
         warn('no charge branch: helices are straight lines (phi off by up to a few '
              'mm on the disks)')
-    if 'vx' not in tmpl or 'vy' not in tmpl:
-        warn('no transverse reference point: tracks start at x = y = 0, so phi at '
-             'L1 is off by up to (beam offset)/(2.9 cm)')
+    for tm in (tmpl, tmpl_mc):
+        xy = [k for k in ('vx', 'vy', 'pv_x', 'pv_y')
+              if k in HELIX_ORIGINS[tm.origin]['needs'] and k not in tm]
+        if xy:
+            warn('%s disabled: those tracks start at x = y = 0, so phi at L1 is off by up '
+                 'to (beam offset)/(2.9 cm)' % ', '.join(xy))
 
     # every branch, every file, before any reading
     sel_all = ' & '.join(s for s in (info['selection'],) if s)
     needed = {}
-    for sample, extra_sel, wt in (('data', info['data_selection'], ''),
-                                  ('mc', info['mc_selection'], info['mc_weight'])):
+    for sample, extra_sel, wt, tm in (('data', info['data_selection'], '', tmpl),
+                                      ('mc', info['mc_selection'], info['mc_weight'], tmpl_mc)):
         b = selection_branches(sel_all) | selection_branches(extra_sel)
         for mu in a.muons:
-            b |= {t.format(mu=mu) for t in tmpl.values() if '{mu}' in t}
-        b |= {t for t in tmpl.values() if '{mu}' not in t}
+            b |= {t.format(mu=mu) for t in tm.values() if '{mu}' in t}
+        b |= {t for t in tm.values() if '{mu}' not in t}
         if wt:
             b.add(wt)
         if sample == 'data':
@@ -1060,7 +1172,7 @@ def main():
     rd = process_sample('data', info['data'], info, tmpl, run_branch, a, surfaces,
                         use_mask, entries, is_mc=False)
     print('[read] MC')
-    rm = process_sample('MC', info['mc'], info, tmpl, run_branch, a, surfaces,
+    rm = process_sample('MC', info['mc'], info, tmpl_mc, run_branch, a, surfaces,
                         use_mask, entries, is_mc=True)
 
     # ------------------------------------------------------------------ numbers
@@ -1069,7 +1181,9 @@ def main():
                    n_selected=dict(data=rd['n_selected'], mc=rm['n_selected']),
                    selection=info['selection'], mc_selection=info['mc_selection'],
                    data_selection=info['data_selection'], mc_weight=info['mc_weight'],
-                   branches=tmpl)
+                   branches=tmpl, branches_mc=tmpl_mc, helix_origin=a.origin['data'],
+                   helix_origin_data=a.origin['data'], helix_origin_mc=a.origin['mc'],
+                   origin_sig_cut=a.origin_sig_cut)
     bad_rows = []
     text = [
         'Pixel hit-efficiency maps, epoch %s' % a.epoch,
@@ -1133,7 +1247,11 @@ def main():
     text += ['', 'geometry (approximate, CHECK): BPix r = %s cm, |z| < %.1f cm; FPix |z| = %s cm, '
              '%.1f < r < %.1f cm' % (GEOM['BPIX_R'], GEOM['BPIX_HALF_Z'], GEOM['FPIX_Z'],
                                     GEOM['FPIX_R'][0], GEOM['FPIX_R'][1])]
+    text += ['helix     : ' + origin_text(a)]
     text += ['branches  : ' + ', '.join('%s=%s' % kv for kv in sorted(tmpl.items()))]
+    if dict(tmpl_mc) != dict(tmpl):
+        text += ['MC        : ' + ', '.join('%s=%s' % kv for kv in sorted(tmpl_mc.items())
+                                            if tmpl.get(kv[0]) != kv[1])]
 
     print('\n' + '\n'.join(text[17:]))
 

@@ -186,8 +186,11 @@ def main():
     t0 = time.time()
     info = P.load_epoch(a)
     adjust_selection(info, a)
-    tmpl, run_branch = H.resolve_branches(a)
+    tmpl, run_branch = H.resolve_branches(a, sample='data')
+    tmpl_m, _ = H.resolve_branches(a, sample='mc')
     tmpl = H.drop_missing_optional(tmpl, [info['data'], info['mc']], info['tree'], a.muons)
+    tmpl_m = H.drop_missing_optional(tmpl_m, [info['data'], info['mc']], info['tree'], a.muons,
+                                     quiet_masks=True)
     surfaces = choose_surfaces(a.surfaces, tmpl)
     out = a.out or 'killmaps_%s' % a.epoch
     os.makedirs(out, exist_ok=True)
@@ -195,7 +198,7 @@ def main():
 
     sel_d, sel_m = H.selection_expr(info, False), H.selection_expr(info, True)
     need_d = H.sample_branches(tmpl, a.muons, sel_d, [run_branch])
-    need_m = H.sample_branches(tmpl, a.muons, sel_m,
+    need_m = H.sample_branches(tmpl_m, a.muons, sel_m,
                                [info['mc_weight']] if info['mc_weight'] else [])
     print('kill maps, epoch %s: %d data files, MC %s (weight %s)'
           % (a.epoch, len(info['data']), ', '.join(os.path.basename(f) for f in info['mc']),
@@ -272,6 +275,7 @@ def main():
     print('\n[2/3] maps per run range (data)')
     d_num = {s: np.zeros((R, len(edges[s][0]) - 1, len(edges[s][1]) - 1)) for s in edges}
     d_den = {s: np.zeros_like(d_num[s]) for s in edges}
+    start = {k: np.zeros(2) for k in ('data', 'mc')}     # L1 probes: [all, from the PV]
     for chunk, n in H.iterate(info['data'], info['tree'], need_d, a, entries, 'data maps'):
         sel = P.eval_selection(sel_d, chunk, n)
         run_ev = np.asarray(chunk[run_branch])[:n][sel].astype(np.int64)
@@ -282,6 +286,8 @@ def main():
                 x, y, hit, ok = probes(v, s, a)
                 ix, iy, inmap = H.cell_index(*edges[s], x, y)
                 ok &= inmap
+                if s == 'L1':
+                    start['data'] += [ok.sum(), (ok & v['from_pv']).sum()]
                 shape = d_num[s].shape
                 flat = np.ravel_multi_index((rng_idx[ok], ix[ok], iy[ok]), shape)
                 d_den[s] += np.bincount(flat, minlength=np.prod(shape)).reshape(shape)
@@ -304,11 +310,13 @@ def main():
         else:
             w = np.ones(int(sel.sum()))
         for mu in a.muons:
-            v = H.muon_view(chunk, mu, tmpl, a, sel)
+            v = H.muon_view(chunk, mu, tmpl_m, a, sel)
             for s in surfaces:
                 x, y, hit, ok = probes(v, s, a)
                 ix, iy, inmap = H.cell_index(*edges[s], x, y)
                 ok &= inmap
+                if s == 'L1':
+                    start['mc'] += [w[ok].sum(), w[ok & v['from_pv']].sum()]
                 shape = m['num'][s].shape
                 flat = np.ravel_multi_index((ix[ok], iy[ok]), shape)
                 for k, ww in (('den', w[ok]), ('den2', w[ok] ** 2),
@@ -317,11 +325,17 @@ def main():
                                            minlength=np.prod(shape)).reshape(shape)
     if n_drop:
         print('    %d selected MC events dropped for a non-finite %s' % (n_drop, info['mc_weight']))
+    pv_frac = {k: float(v_[1] / v_[0]) if v_[0] > 0 else 0.0 for k, v_ in start.items()}
+    print('    helix start at the PV: %.1f%% of the data L1 probes, %.1f%% of the MC ones (%s)'
+          % (100 * pv_frac['data'], 100 * pv_frac['mc'], P.origin_text(a)))
 
     meta = dict(epoch=a.epoch, config=os.path.abspath(a.config), lumi_kind=lumi_kind,
                 min_den_per_range=min_den, min_gain=a.min_gain, splits=gains,
                 nbins_phi=a.nbins_phi, nbins_r=a.nbins_r, geometry=GEOM,
-                branches=tmpl, z0_from=a.z0_from, helix_origin=a.helix_origin,
+                branches=tmpl, branches_mc=tmpl_m,
+                helix_origin=a.origin['data'], helix_origin_data=a.origin['data'],
+                helix_origin_mc=a.origin['mc'], origin_sig_cut=a.origin_sig_cut,
+                start_from_pv=pv_frac,
                 min_other_hits=a.min_other_hits,
                 selection=info['selection'], mc_selection=info['mc_selection'],
                 data_selection=info.get('data_selection', ''), drop_cut=a.drop_cut,
@@ -353,6 +367,9 @@ def report_lines(km, runs, tab, segs, a):
          '            (at most %d ranges, each >= %d L1 probes, split gain > %g in -2lnL)'
          % (a.max_ranges, km.meta['min_den_per_range'], a.min_gain),
          'MC share  : %s' % km.meta['lumi_kind'],
+         'helix     : %s; starts at the PV for %.1f%% (data) / %.1f%% (MC) of the L1 probes'
+         % (P.origin_text(a), 100 * km.meta['start_from_pv']['data'],
+            100 * km.meta['start_from_pv']['mc']),
          'eps       = HIT EFFICIENCY of a cell = probes with a valid hit / probes (eps_data: data, eps_MC: MC)',
          'P_kill    = 1 - eps_data/eps_MC where eps_data < eps_MC (else 0)',
          'weights   = eps_data/eps_MC (hit) and (1-eps_data)/(1-eps_MC) (no hit)',

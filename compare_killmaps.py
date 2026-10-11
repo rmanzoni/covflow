@@ -3,7 +3,9 @@
 compare_killmaps.py -- do two kill-map builds see the same detector?
 
 Compares the DATA hit efficiency of two builds of build_kill_maps.py, cell by
-cell, e.g. the prompt / non-prompt split of HITEMU.md 3.7:
+cell (and, in a table, the MC hit efficiency and the average P_kill: for builds
+that differ on the MC side only, e.g. --helix-origin-mc gen, HITEMU.md 3.8),
+e.g. the prompt / non-prompt split of HITEMU.md 3.7:
 
   A: non-prompt probes (the decay-length cut of the covflow selection)
   B: prompt probes     (--drop-cut lxy --data-extra '<decay length> < cut')
@@ -37,7 +39,7 @@ import os
 import numpy as np
 
 import hitemu as H
-from pixel_eff_maps import die
+from pixel_eff_maps import die, warn
 
 
 def parse_args():
@@ -49,6 +51,9 @@ def parse_args():
     p.add_argument('--min-probes', type=float, default=30,
                    help='cells with fewer data probes in either build are skipped')
     p.add_argument('--surfaces', nargs='+', default=None, help='default: all common')
+    p.add_argument('--allow-origin-change', action='store_true',
+                   help='compare builds whose data helix starts at different points '
+                        '(default: refuse)')
     p.add_argument('--out', default='compare_killmaps')
     return p.parse_args()
 
@@ -73,6 +78,35 @@ def summary(p):
         return dict(n=0)
     return dict(n=int(len(v)), mean=float(v.mean()), rms=float(v.std()),
                 chi2ndf=float((v ** 2).mean()), frac3=float((np.abs(v) > 3).mean()))
+
+
+def mean_pkill(km, s, acc):
+    """P_kill averaged over the data probes of each range, ranges weighted by
+    their MC share: the fraction of MC hits the emulation removes."""
+    dd = km.d_den[s][:, acc]
+    pk = km.p_kill[s][:, acc]
+    per = (pk * dd).sum((1, 2)) / np.maximum(dd.sum((1, 2)), 1)
+    return float((np.asarray(km.lumi) * per).sum() / max(np.sum(km.lumi), 1e-12))
+
+
+def mc_compare(A, B, s, acc, min_probes):
+    """MC side: eps_MC per cell (one map per epoch, weighted) and the average
+    P_kill. Meant for builds that differ in the MC selection or the MC start
+    point (e.g. --helix-origin-mc gen vs dimuon_vertex), where the data maps
+    are the same. On the same MC events the differences are migrations, not
+    fluctuations: no pulls, the size of the change is the result."""
+    with np.errstate(divide='ignore', invalid='ignore'):
+        ea, eb = A.m_num[s] / A.m_den[s], B.m_num[s] / B.m_den[s]
+        na = A.m_den[s] ** 2 / A.m_den2[s]
+        nb = B.m_den[s] ** 2 / B.m_den2[s]
+    m = acc & (na >= min_probes) & (nb >= min_probes)
+    d = np.abs(ea - eb)[m]
+    return dict(eps_mc_a=float(A.m_num[s][acc].sum() / max(A.m_den[s][acc].sum(), 1e-12)),
+                eps_mc_b=float(B.m_num[s][acc].sum() / max(B.m_den[s][acc].sum(), 1e-12)),
+                cells=int(m.sum()), mean_abs_diff=float(d.mean()) if len(d) else np.nan,
+                max_abs_diff=float(d.max()) if len(d) else np.nan,
+                frac_diff_gt_002=float((d > 0.02).mean()) if len(d) else np.nan,
+                pkill_a=mean_pkill(A, s, acc[:, 0]), pkill_b=mean_pkill(B, s, acc[:, 0]))
 
 
 def yield_profile(km, s, bins):
@@ -103,10 +137,19 @@ def main():
     A, B = H.KillMaps.load(a.a), H.KillMaps.load(a.b)
     if A.meta.get('epoch') != B.meta.get('epoch'):
         die('different epochs: %s and %s' % (A.meta.get('epoch'), B.meta.get('epoch')))
-    for k in ('helix_origin', 'nbins_phi', 'nbins_r'):
+    for k in ('nbins_phi', 'nbins_r'):
         if A.meta.get(k) != B.meta.get(k):
             die('the builds differ in %s (%s vs %s): their cells are not comparable'
                 % (k, A.meta.get(k), B.meta.get(k)))
+    oa, ob = [(H.meta_origin(m, 'data'), m.get('origin_sig_cut')
+               if H.meta_origin(m, 'data') == 'pv_or_vertex' else None) for m in (A.meta, B.meta)]
+    if oa != ob:
+        msg = ('the data maps start the helix at different points (%s vs %s): a cell does not '
+               'hold exactly the same tracks' % (oa, ob))
+        if not a.allow_origin_change:
+            die(msg + '\n  pass --allow-origin-change to compare them anyway (e.g. to measure '
+                'the effect of the origin itself)')
+        warn(msg)
     surfaces = a.surfaces or [s for s in A.surfaces if s in B.surfaces]
     same_ranges = A.ranges == B.ranges
     la, lb = a.labels
@@ -158,6 +201,7 @@ def main():
         prof_a, ratio_a = yield_profile(A, s, bins)
         prof_b, ratio_b = yield_profile(B, s, bins)
         sm['dead_alive_yield'] = {la: ratio_a, lb: ratio_b}
+        sm['mc'] = mc_compare(A, B, s, acc, a.min_probes)
         res['surfaces'][s] = sm
 
         fig, ax = plt.subplots(1, 4, figsize=(20, 4.6))
@@ -202,6 +246,16 @@ def main():
             print('  range %d %s' % (k, '  '.join('%s %.2f (%d)' % (
                 s, res['surfaces'][s]['per_range'][k].get('chi2ndf', np.nan),
                 res['surfaces'][s]['per_range'][k].get('n', 0)) for s in surfaces)))
+    om = [H.meta_origin(km.meta, 'mc') for km in (A, B)]
+    print('\n  MC side (start point %s: %s, %s: %s): eps_MC in acceptance, cells with |delta eps_MC| > 0.02,'
+          '\n  and the average P_kill (the fraction of MC hits the emulation removes)' % (la, om[0], lb, om[1]))
+    print('  %-5s %9s %9s %7s %9s %9s %10s %10s' % ('surf', 'eps_MC A', 'eps_MC B', 'cells',
+                                                   '>0.02', 'max|d|', 'P_kill A', 'P_kill B'))
+    for s_, sm in res['surfaces'].items():
+        mc = sm['mc']
+        print('  %-5s %9.4f %9.4f %7d %9.4f %9.4f %10.5f %10.5f'
+              % (s_, mc['eps_mc_a'], mc['eps_mc_b'], mc['cells'], mc['frac_diff_gt_002'],
+                 mc['max_abs_diff'], mc['pkill_a'], mc['pkill_b']))
     pdf.close()
     with open(os.path.join(a.out, 'compare_%s.json' % epoch), 'w') as f:
         json.dump(res, f, indent=1)
